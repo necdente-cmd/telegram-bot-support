@@ -2,7 +2,7 @@
 logs/
 scripts/
 __pycache__/
-*.pyc
+.pyc
 .env
 support.db
-*.db
+.db
