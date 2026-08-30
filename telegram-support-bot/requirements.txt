@@ -1,0 +1,7 @@
+python-telegram-bot[job-queue]==21.11
+openai>=1.51.0
+SQLAlchemy>=2.0.36
+alembic>=1.14.0
+pydantic-settings>=2.6.0
+python-dotenv>=1.0.1
+PyYAML>=6.0.2
