@@ -75,3 +75,8 @@ commands:
     description: Delete knowledge base entry
     handler: bot.handlers.admin.delete_kb_command
     admin_only: true
+
+  - name: stats_kb
+    description: Knowledge base statistics
+    handler: bot.handlers.admin.stats_kb_command
+    admin_only: true
