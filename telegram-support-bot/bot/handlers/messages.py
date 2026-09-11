@@ -11,19 +11,14 @@ from telegram.ext import ContextTypes
 from bot.data.phrases import BOT_INFO_TEXT
 from bot.exceptions import DatabaseError, ExternalAPIError
 from bot.handlers.common import (
-    advice_of,
-    matcher_of,
-    notifications_of,
-    repo_of,
-    safe_reply,
-    settings_of,
+    advice_of, ai_of, matcher_of, notifications_of,
+    repo_of, safe_reply, settings_of,
 )
 
 logger = logging.getLogger(__name__)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Route free-text messages: help phrases, keywords, or bot-info questions."""
     message = update.message
     if message is None or not message.text:
         return
@@ -40,7 +35,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except DatabaseError:
         logger.error("Ban check failed; allowing message through")
 
-    # Ignore replies in threads and anything that looks like a command leftover.
     if message.reply_to_message or text.startswith("/"):
         return
 
@@ -68,29 +62,51 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         try:
             await notifications_of(context).escalate(
-                context.bot,
-                username=username,
-                body=text,
-                kind="help",
+                context.bot, username=username, body=text, kind="help",
             )
         except ExternalAPIError:
             await safe_reply(message, "⚠️ Не удалось отправить уведомление. Попробуйте позже.")
         return
 
     if matcher.matches_keyword(text):
-        logger.info("Keyword match recognized")
+        logger.info("Keyword match — trying RAG")
+
+        # 🧠 RAG: сначала ищем готовое решение в базе знаний
+        try:
+            solutions = repo_of(context).search_solutions(text, min_matches=2, limit=3)
+        except DatabaseError:
+            solutions = []
+
+        ai = ai_of(context)
+        if solutions and ai.enabled:
+            logger.info("RAG: found %s solutions", len(solutions))
+            try:
+                answer = ai.answer_with_context(text, solutions)
+                await safe_reply(message, f"✅ {answer}")
+                return
+            except ExternalAPIError:
+                logger.warning("RAG AI failed, falling back to advice")
+
+        # Fallback: обычная логика (ИИ или рандомный совет + кнопки)
         context.user_data["last_problem_text"] = text
+        advice = ""
+        if ai.enabled:
+            try:
+                advice = ai.ask(text)
+            except ExternalAPIError:
+                advice = advice_of(context).random_advice()
+        else:
+            advice = advice_of(context).random_advice()
+
         keyboard = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton("✅ Помогло", callback_data="advice_helped"),
-                    InlineKeyboardButton("❌ Не помогло", callback_data="advice_not_helped"),
-                ]
-            ]
+            [[
+                InlineKeyboardButton("✅ Помогло", callback_data="advice_helped"),
+                InlineKeyboardButton("❌ Не помогло", callback_data="advice_not_helped"),
+            ]]
         )
         try:
             await message.reply_text(
-                f"🧠 Совет по решению:\n{advice_of(context).random_advice()}\n\n"
+                f"🧠 Совет по решению:\n{advice}\n\n"
                 "Если совет помог, нажмите «Помогло». Если нет — мы отправим запрос аналитику.",
                 reply_markup=keyboard,
             )
