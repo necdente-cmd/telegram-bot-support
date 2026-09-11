@@ -13,32 +13,33 @@ class Base(DeclarativeBase):
 
 
 class Keyword(Base):
-    """Phrase that triggers a troubleshooting-advice reply."""
-
     __tablename__ = "keywords"
-
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     word: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
 
 
 class ResponsibleUser(Base):
-    """Telegram username (without @) that should be mentioned on escalation."""
-
     __tablename__ = "responsible_users"
-
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     username: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
 
 
 class BannedUser(Base):
-    """User blocked from interacting with the bot."""
-
     __tablename__ = "banned_users"
-
     user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
     banned_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        server_default=func.now(),
-        nullable=False,
+        DateTime(timezone=True), server_default=func.now(), nullable=False,
+    )
+
+
+class KnowledgeBase(Base):
+    """Problem + solution pairs learned from admins (RAG)."""
+    __tablename__ = "knowledge_base"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    problem_text: Mapped[str] = mapped_column(Text, nullable=False)
+    solution_text: Mapped[str] = mapped_column(Text, nullable=False)
+    keywords: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False,
     )
