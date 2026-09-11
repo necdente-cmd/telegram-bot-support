@@ -11,6 +11,16 @@ commands:
     handler: bot.handlers.commands.ask_command
     admin_only: false
 
+  - name: top
+    description: Top problems for the last 7 days
+    handler: bot.handlers.commands.top_command
+    admin_only: false
+
+  - name: feedback
+    description: Send feedback or suggestion
+    handler: bot.handlers.commands.feedback_command
+    admin_only: false
+
   - name: list_keywords
     description: List keyword phrases
     handler: bot.handlers.commands.list_keywords_command
