@@ -21,6 +21,13 @@ _MARKDOWN_PATTERNS = (
     (re.compile(r"\[(.*?)\]\(.*?\)", re.DOTALL), r"\1"),
 )
 
+_LANGUAGE_INSTRUCTION = (
+    "ЯЗЫК ОТВЕТА: определяй язык вопроса и отвечай на том же языке. "
+    "Если вопрос на русском — отвечай на русском. "
+    "Если вопрос на кыргызском — отвечай на кыргызском. "
+    "НИКОГДА не смешивай языки в одном ответе."
+)
+
 
 def strip_markdown(text: str) -> str:
     cleaned = text
@@ -58,21 +65,17 @@ class AiService:
             response = self._client.chat.completions.create(
                 model=self._settings.ai_model,
                 messages=[
-                    {"role": "system", "content": "Ты — полезный и информативный ассистент."},
+                    {"role": "system", "content": f"Ты — полезный и информативный ассистент. {_LANGUAGE_INSTRUCTION}"},
                     {"role": "user", "content": question},
                 ],
             )
         except RateLimitError as exc:
-            logger.error("AI rate limit: %s", exc)
             raise ExternalAPIError("AI rate limit exceeded") from exc
         except APITimeoutError as exc:
-            logger.error("AI timeout: %s", exc)
             raise ExternalAPIError("AI request timed out") from exc
         except APIError as exc:
-            logger.error("AI API error: %s", exc)
             raise ExternalAPIError("AI request failed") from exc
         except Exception as exc:
-            logger.exception("Unexpected AI error")
             raise ExternalAPIError("AI request failed") from exc
 
         choice = response.choices[0].message.content if response.choices else None
@@ -81,7 +84,6 @@ class AiService:
         return strip_markdown(choice)
 
     def answer_with_context(self, question: str, context_solutions: list[str]) -> str:
-        """RAG: отвечает, используя найденные в базе знаний решения."""
         if self._client is None:
             raise ExternalAPIError("AI is not configured")
 
@@ -91,15 +93,21 @@ class AiService:
             response = self._client.chat.completions.create(
                 model=self._settings.ai_model,
                 messages=[
-                    {"role": "system", "content": (
-                        "Ты — технический эксперт поддержки IT-системы Sanarip Clinic.\n"
-                        "Тебе дают вопрос пользователя и выдержки из базы знаний "
-                        "(ранее решённые похожие проблемы).\n"
-                        "Сформулируй КРАТКИЙ, точный и вежливый ответ на основе этих выдержек.\n"
-                        "Если выдержки не помогают — честно скажи, что не знаешь решения.\n"
-                        "Отвечай на том же языке, на котором задан вопрос."
-                    )},
-                    {"role": "user", "content": f"Вопрос: {question}\n\nИзвестные решения:\n{context}"},
+                    {
+                        "role": "system",
+                        "content": (
+                            "Ты — технический эксперт поддержки IT-системы Sanarip Clinic.\n"
+                            "Тебе дают вопрос пользователя и выдержки из базы знаний "
+                            "(ранее решённые похожие проблемы).\n"
+                            "Сформулируй КРАТКИЙ, точный и вежливый ответ на основе этих выдержек.\n"
+                            "Если выдержки не помогают — честно скажи, что не знаешь решения.\n"
+                            f"{_LANGUAGE_INSTRUCTION}"
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Вопрос: {question}\n\nИзвестные решения:\n{context}",
+                    },
                 ],
             )
             choice = response.choices[0].message.content if response.choices else None
@@ -109,5 +117,4 @@ class AiService:
         except ExternalAPIError:
             raise
         except Exception as exc:
-            logger.exception("RAG AI request failed")
             raise ExternalAPIError("AI request failed") from exc
