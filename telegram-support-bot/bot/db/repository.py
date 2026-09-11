@@ -16,9 +16,68 @@ from bot.exceptions import DatabaseError
 logger = logging.getLogger(__name__)
 
 
+# ---------- Синонимы для поиска по смыслу без embeddings ----------
+SYNONYMS: dict[str, set[str]] = {
+    "зависает": {"катып", "жатат", "висит", "завис", "зависать", "тормозит", "фризит"},
+    "катып": {"зависает", "жатат", "висит", "завис", "фризит"},
+    "жатат": {"зависает", "катып"},
+    "тормозит": {"зависает", "медленно", "жай", "иштейт", "лаг"},
+    "медленно": {"тормозит", "жай", "иштейт"},
+    "жай": {"медленно", "тормозит", "иштейт"},
+    "работает": {"иштейт", "иштеп"},
+    "иштейт": {"работает", "иштеп"},
+    "не": {"жок", "иштебей"},
+    "жок": {"не", "иштебей"},
+    "ошибка": {"баг", "глюк", "error", "проблема", "ката"},
+    "баг": {"ошибка", "глюк", "проблема"},
+    "глюк": {"ошибка", "баг", "проблема"},
+    "открывается": {"ачылат", "грузит", "загружается"},
+    "ачылат": {"открывается", "грузит"},
+    "грузит": {"открывается", "загружается"},
+    "сайт": {"мис", "система", "портал"},
+    "мис": {"сайт", "система"},
+    "система": {"сайт", "мис", "программа"},
+    "пароль": {"password", "логин", "login", "вход"},
+    "вход": {"пароль", "логин", "login"},
+    "печать": {"принтер", "распечатать", "печатает"},
+    "принтер": {"печать", "распечатать"},
+    "медкарта": {"карта", "пациент", "амбулаторная", "стационарная"},
+    "карта": {"медкарта", "пациент"},
+    "пациент": {"карта", "медкарта"},
+    "больничный": {"лвн", "лист", "нетрудоспособности"},
+    "лвн": {"больничный", "лист"},
+}
+
+
+def _stem(word: str) -> str:
+    """Грубый стемминг для русских/кыргызских слов: убираем частые окончания."""
+    if len(word) <= 4:
+        return word
+    for suffix in (
+        "ается", "яется", "ится", "ется", "ает", "яет", "ует",
+        "ат", "ят", "ет", "ит", "ут", "ют", "ать", "ять", "ить", "еть",
+        "ами", "ями", "ов", "ев", "ах", "ях", "ой", "ей", "ый", "ий",
+        "ая", "яя", "ое", "ее", "ые", "ие", "ам", "ям", "ом", "ем",
+    ):
+        if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+            return word[: -len(suffix)]
+    return word
+
+
 def _extract_words(text: str) -> set[str]:
+    """Извлекает значимые слова (>3 символов), стеммит их и добавляет синонимы."""
     words = re.findall(r"\w+", text.lower())
-    return {w for w in words if len(w) > 3}
+    result: set[str] = set()
+    for w in words:
+        if len(w) <= 3:
+            continue
+        stemmed = _stem(w)
+        result.add(stemmed)
+        # Добавляем синонимы (и их стемы)
+        for syn in SYNONYMS.get(w, set()):
+            if len(syn) > 3:
+                result.add(_stem(syn))
+    return result
 
 
 class SupportRepository:
@@ -172,21 +231,45 @@ class SupportRepository:
             logger.exception("Failed to add knowledge base entry")
             raise DatabaseError("Could not add solution") from exc
 
-    def search_solutions(self, query_text: str, min_matches: int = 2, limit: int = 3) -> list[str]:
+    def search_solutions(self, query_text: str, min_matches: int = 1, limit: int = 3) -> list[str]:
+        """Взвешенный поиск: редкие совпадения весят больше, чем частые."""
         query_words = _extract_words(query_text)
         if not query_words:
             return []
         try:
             with session_scope() as session:
                 rows = session.scalars(select(KnowledgeBase)).all()
-                scored: list[tuple[int, str]] = []
+                if not rows:
+                    return []
+
+                # Считаем частоту слов во всей базе (IDF)
+                all_kb_words: dict[str, int] = {}
+                parsed: list[tuple[object, set[str]]] = []
                 for row in rows:
                     kb_words = set((row.keywords or "").split())
-                    matches = len(query_words & kb_words)
-                    if matches >= min_matches:
-                        scored.append((matches, row.solution_text))
+                    parsed.append((row, kb_words))
+                    for w in kb_words:
+                        all_kb_words[w] = all_kb_words.get(w, 0) + 1
+
+                # Взвешенный счёт для каждой записи
+                scored: list[tuple[float, str]] = []
+                total_docs = len(parsed)
+                for row, kb_words in parsed:
+                    common = query_words & kb_words
+                    if not common:
+                        continue
+                    score = 0.0
+                    for w in common:
+                        # IDF: редкое слово = высокий вес
+                        idf = 1.0 + (1.0 / max(all_kb_words.get(w, 1), 1))
+                        score += idf
+                    # Бонус за количество совпадений
+                    score += 0.5 * (len(common) - 1)
+                    scored.append((score, row.solution_text))
+
                 scored.sort(reverse=True, key=lambda x: x[0])
-                return [sol for _, sol in scored[:limit]]
+                # Возвращаем только те, у кого score > порога
+                return [sol for sc, sol in scored[:limit] if sc > 1.0]
         except SQLAlchemyError as exc:
             logger.exception("Failed to search solutions")
             raise DatabaseError("Could not search solutions") from exc
