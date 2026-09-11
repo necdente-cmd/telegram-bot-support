@@ -1,8 +1,4 @@
 # Slash-commands registered at startup and on /reload_commands.
-# Change this file, then send /reload_commands as an admin — no process restart.
-#
-# handler: dotted path to an async function (Update, ContextTypes) -> None
-# admin_only: extra server-side check against ADMIN_IDS
 
 commands:
   - name: help
@@ -63,4 +59,19 @@ commands:
   - name: reload_commands
     description: Reload slash-commands without restarting
     handler: bot.handlers.admin.reload_commands_command
+    admin_only: true
+
+  - name: add_solution
+    description: Add solution to knowledge base
+    handler: bot.handlers.admin.add_solution_command
+    admin_only: true
+
+  - name: list_kb
+    description: Show knowledge base
+    handler: bot.handlers.admin.list_kb_command
+    admin_only: true
+
+  - name: delete_kb
+    description: Delete knowledge base entry
+    handler: bot.handlers.admin.delete_kb_command
     admin_only: true
