@@ -77,9 +77,11 @@ class NotificationService:
 
         mentions = " ".join(f"@{user}" for user in responsible)
         if kind == "help":
-            header = f"⚠️ Пользователь {display} запросил помощь."
-        else:
-            header = f"⚠️ Пользователь {display} не смог решить проблему."
+    header = f"⚠️ Пользователь {display} запросил помощь."
+elif kind == "feature":
+    header = f"📝 Пользователь {display} предложил доработку."
+else:
+    header = f"⚠️ Пользователь {display} не смог решить проблему."
         text = f"{header}\nСообщение: {body}\nОтветственные: {mentions}"
 
         try:
