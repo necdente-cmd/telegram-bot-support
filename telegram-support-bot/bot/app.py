@@ -102,4 +102,4 @@ def run() -> None:
     configure_logging(settings)
     logger.info("Starting support bot")
     application = build_application(settings)
-    application.run_polling(drop_pending_updates=True)
+    application.run_polling(drop_pending_updates=False)
