@@ -18,44 +18,57 @@ from bot.handlers.common import (
 
 logger = logging.getLogger(__name__)
 
-# Парсим проблему из эскалации: "Сообщение: {text}"
 _ESCALATION_RE = re.compile(r"Сообщение:\s*(.+)", re.DOTALL)
 
 
-async def _try_learn_from_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Если админ отвечает реплаем на сообщение бота — сохраняем решение.
+def _remember_problem(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str) -> None:
+    if "last_problem_by_chat" not in context.bot_data:
+        context.bot_data["last_problem_by_chat"] = {}
+    context.bot_data["last_problem_by_chat"][chat_id] = text
 
-    Возвращает True, если апдейт обработан (и дальше идти не нужно).
-    """
+
+def _get_last_problem(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> str | None:
+    return context.bot_data.get("last_problem_by_chat", {}).get(chat_id)
+
+
+async def _try_learn_from_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Если админ отвечает реплаем на сообщение бота — сохраняем решение."""
     message = update.message
     reply_to = message.reply_to_message
     if reply_to is None:
         return False
 
-    # Только сообщения от НАШЕГО бота
     me = await context.bot.get_me()
     if reply_to.from_user is None or reply_to.from_user.id != me.id:
         return False
 
-    # Только админы
     settings = settings_of(context)
     user = message.from_user
     if not user or not settings.is_admin(user.id):
         return False
 
-    # Достаём текст проблемы из исходного сообщения бота
-    original = reply_to.text or ""
-    match = _ESCALATION_RE.search(original)
-    if not match:
-        return False
-
-    problem_text = match.group(1).strip()
     solution_text = (message.text or "").strip()
-
-    # Отсеиваем "ок", "принял", короткие фразы
     if len(solution_text) < 15 or solution_text.startswith("/"):
         return False
-    if len(problem_text) < 5:
+
+    # Приоритет 1: связь msg_id → problem_text (сохранена при эскалации)
+    pending = context.bot_data.get("pending_escalations", {})
+    problem_text = pending.get(reply_to.message_id, "")
+
+    # Приоритет 2: парсим из текста эскалации
+    if not problem_text:
+        original = reply_to.text or ""
+        match = _ESCALATION_RE.search(original)
+        if match:
+            problem_text = match.group(1).strip()
+
+    # Приоритет 3: последнее сообщение пользователя в этом чате
+    if not problem_text:
+        last = _get_last_problem(context, message.chat_id)
+        if last:
+            problem_text = last
+
+    if not problem_text or len(problem_text) < 5:
         return False
 
     try:
@@ -66,13 +79,14 @@ async def _try_learn_from_reply(update: Update, context: ContextTypes.DEFAULT_TY
             "при похожих проблемах.",
         )
         logger.info("Auto-learned solution for: %s", problem_text[:60])
+        if reply_to.message_id in pending:
+            del pending[reply_to.message_id]
     except DatabaseError:
         await safe_reply(message, "⚠️ Не удалось сохранить решение в базу знаний.")
     return True
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Route free-text messages: auto-learn, RAG, help phrases, keywords."""
     message = update.message
     if message is None or not message.text:
         return
@@ -89,11 +103,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except DatabaseError:
         logger.error("Ban check failed; allowing message through")
 
-    # 1) АВТООБУЧЕНИЕ: админ ответил реплаем на сообщение бота?
     if message.reply_to_message:
         if await _try_learn_from_reply(update, context):
             return
-        return  # другие реплаи игнорируем
+        return
 
     if text.startswith("/"):
         return
@@ -115,6 +128,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if matcher.is_help_request(text):
         logger.info("Help request recognized")
+        _remember_problem(context, message.chat_id, text)
         await safe_reply(
             message,
             "🆘 Я вас понял! Сейчас передам сообщение ответственному.\n"
@@ -122,7 +136,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         try:
             await notifications_of(context).escalate(
-                context.bot, username=username, body=text, kind="help",
+                context.bot, username=username, body=text, kind="help", context=context,
             )
         except ExternalAPIError:
             await safe_reply(message, "⚠️ Не удалось отправить уведомление. Попробуйте позже.")
@@ -130,8 +144,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if matcher.matches_keyword(text):
         logger.info("Keyword match — trying RAG")
+        _remember_problem(context, message.chat_id, text)
+        context.user_data["last_problem_text"] = text
 
-        # 🧠 RAG: ищем готовое решение в базе знаний
         try:
             solutions = repo_of(context).search_solutions(text, min_matches=1, limit=3)
         except DatabaseError:
@@ -154,8 +169,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             except ExternalAPIError:
                 logger.warning("RAG AI failed, falling back to advice")
 
-        # Fallback: обычная логика (ИИ или рандомный совет + кнопки)
-        context.user_data["last_problem_text"] = text
+        # Fallback
         advice = ""
         if ai.enabled:
             try:
