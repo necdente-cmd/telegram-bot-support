@@ -187,7 +187,7 @@ async def list_kb_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     response = f"📚 База знаний (всего: {total}):\n\n"
     for r in rows:
-        response += f"#{r.id}: {r.problem_text[:60]}\n→ {r.solution_text[:80]}\n\n"
+        response += f"#{r.id} (⭐{r.rating}): {r.problem_text[:60]}\n→ {r.solution_text[:80]}\n\n"
     await safe_reply(update.message, response[:4000])
 
 
@@ -206,3 +206,41 @@ async def delete_kb_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await safe_reply(update.message, f"Запись #{kb_id} не найдена.")
         return
     await safe_reply(update.message, f"✅ Запись #{kb_id} удалена.")
+
+
+async def stats_kb_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Админ: /stats_kb — статистика базы знаний."""
+    try:
+        stats = repo_of(context).get_kb_stats()
+    except DatabaseError:
+        await safe_reply(update.message, "❌ Не удалось получить статистику.")
+        return
+
+    if stats["total"] == 0:
+        await safe_reply(update.message, "📚 База знаний пуста.")
+        return
+
+    lines = [
+        "📊 Статистика базы знаний",
+        "",
+        f"📚 Всего записей: {stats['total']}",
+        f"⭐ Средний рейтинг: {stats['avg_rating']}",
+        f"🗑️ На грани удаления (≤ -2): {stats['deleted_ready']}",
+        "",
+        "🏆 Топ-5 лучших:",
+    ]
+    has_top = False
+    for item in stats["top"]:
+        if item["rating"] > 0:
+            lines.append(f"  #{item['id']} (⭐{item['rating']}): {item['problem']}")
+            has_top = True
+    if not has_top:
+        lines.append("  (пока нет записей с положительным рейтингом)")
+
+    if stats["negative"]:
+        lines.append("")
+        lines.append("⚠️ С отрицательным рейтингом:")
+        for item in stats["negative"][:5]:
+            lines.append(f"  #{item['id']} (⭐{item['rating']}): {item['problem']}")
+
+    await safe_reply(update.message, "\n".join(lines))
