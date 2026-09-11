@@ -1,4 +1,4 @@
-"""Scheduled jobs: morning greeting, daily report, auto-close."""
+"""Scheduled jobs: morning greeting, daily report."""
 
 from __future__ import annotations
 
@@ -41,10 +41,11 @@ async def daily_report(context: ContextTypes.DEFAULT_TYPE) -> None:
         f"✅ Решено через RAG: <b>{stats['rag']}</b>\n"
         f"👤 Передано ответственным: <b>{stats['escalated']}</b>\n"
         f"📚 Новых записей в базе: <b>{stats['new_kb']}</b>\n"
-        f"💡 Обратной связи: <b>{stats['feedback']}</b>\n"
+        f"💡 Обратной связи: <b>{stats['feedback']}</b>"
     )
     try:
-        await notifications_of(context).notify_group(context.bot, text)
+        await notifications_of(context).notify_group(context.bot, text, parse_mode="HTML")
+        logger.info("Daily report delivered")
     except ExternalAPIError:
         logger.error("Daily report was not delivered")
 
