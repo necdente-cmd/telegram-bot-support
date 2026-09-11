@@ -33,6 +33,7 @@ def _get_last_problem(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> str |
 
 
 async def _try_learn_from_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Автообучение: если админ отвечает реплаем на сообщение бота — сохраняем решение."""
     message = update.message
     reply_to = message.reply_to_message
     if reply_to is None:
@@ -108,14 +109,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     settings = settings_of(context)
     matcher = matcher_of(context)
 
+    # 1) Вопросы о боте
     if matcher.mentions_bot(text, settings.bot_username) or matcher.is_about_bot(text):
         await safe_reply(message, BOT_INFO_TEXT)
         return
 
+    # 2) Технические работы
     if matcher.is_technical_works(text):
         await safe_reply(message, t("tech_works", lang))
         return
 
+    # 3) Явный запрос помощи
     if matcher.is_help_request(text):
         logger.info("Help request recognized")
         _remember_problem(context, message.chat_id, text)
@@ -136,8 +140,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await safe_reply(message, t("notify_failed", lang))
         return
 
-    if matcher.matches_keyword(text):
-        logger.info("Keyword match — trying RAG")
+    # 4) Запрос на доработку системы (длинный технический текст)
+    if matcher.is_feature_request(text) and len(text) > 80:
+        logger.info("Feature request recognized")
+        _remember_problem(context, message.chat_id, text)
+        await safe_reply(
+            message,
+            "📝 Принято! Это запрос на доработку системы. Передаю ответственным.",
+        )
+        try:
+            await notifications_of(context).escalate(
+                context.bot, username=username, body=text, kind="feature", context=context,
+            )
+        except ExternalAPIError:
+            logger.error("Feature escalation failed")
+        return
+
+    # 5) Описание проблемы поддержки → RAG
+    is_problem = matcher.is_support_problem(text)
+    has_keyword = matcher.matches_keyword(text)
+
+    if is_problem and has_keyword:
+        logger.info("Support problem + keyword — trying RAG")
         _remember_problem(context, message.chat_id, text)
         context.user_data["last_problem_text"] = text
 
@@ -171,16 +195,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             except ExternalAPIError:
                 logger.warning("RAG AI failed, falling back to advice")
 
-        # Fallback
-        advice = ""
-        if ai.enabled:
-            try:
-                advice = ai.ask(text)
-            except ExternalAPIError:
-                advice = advice_of(context).random_advice()
-        else:
-            advice = advice_of(context).random_advice()
-
+        # Fallback: случайный совет
+        advice = advice_of(context).random_advice()
         keyboard = InlineKeyboardMarkup(
             [[
                 InlineKeyboardButton(t("btn_helped", lang), callback_data="advice_helped"),
@@ -203,3 +219,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except TelegramError:
             logger.exception("Failed to send advice reply")
         return
+
+    # 6) Просто вопрос / болтовня → ИИ отвечает, без RAG и эскалации
+    ai = ai_of(context)
+    if ai.enabled and len(text) > 2:
+        try:
+            answer = ai.ask(text)
+            # Отвечаем, но коротко
+            if answer and len(answer) < 1000:
+                await message.reply_text(answer)
+                logger.info("General AI answer sent")
+                return
+        except ExternalAPIError:
+            logger.warning("General AI ask failed")
+
+    # Если ИИ не справился — молчим (не эскалируем болтовню)
+    return
