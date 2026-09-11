@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from bot.db.engine import session_scope
-from bot.db.models import BannedUser, Keyword, KnowledgeBase, ResponsibleUser
+from bot.db.models import BannedUser, KbVote, Keyword, KnowledgeBase, ResponsibleUser
 from bot.exceptions import DatabaseError
 
 logger = logging.getLogger(__name__)
@@ -248,7 +248,6 @@ class SupportRepository:
                 if not rows:
                     return []
 
-                # IDF: считаем частоту слов во всей базе
                 all_kb_words: dict[str, int] = {}
                 parsed: list[tuple[KnowledgeBase, set[str]]] = []
                 for row in rows:
@@ -302,7 +301,7 @@ class SupportRepository:
                 if new_rating <= -3:
                     session.delete(row)
                     logger.info("KB #%s удалён (рейтинг %s)", kb_id, new_rating)
-                    return -999  # маркер что удалён
+                    return -999
                 return new_rating
         except SQLAlchemyError as exc:
             logger.exception("Failed to rate kb %s", kb_id)
@@ -346,6 +345,65 @@ class SupportRepository:
         except SQLAlchemyError as exc:
             logger.exception("Failed to delete knowledge base entry %s", kb_id)
             raise DatabaseError("Could not delete solution") from exc
+
+    # ---------- Голосование за KB (защита от повторного голоса) ----------
+    def has_voted_kb(self, kb_id: int, user_id: int) -> bool:
+        """Проверяет, голосовал ли уже этот пользователь за эту запись."""
+        try:
+            with session_scope() as session:
+                existing = session.scalar(
+                    select(KbVote).where(
+                        KbVote.kb_id == kb_id,
+                        KbVote.user_id == user_id,
+                    )
+                )
+                return existing is not None
+        except SQLAlchemyError:
+            logger.exception("Failed to check vote")
+            return False
+
+    def register_kb_vote(self, kb_id: int, user_id: int, vote: int) -> None:
+        """Регистрирует голос пользователя (защита от накрутки)."""
+        try:
+            with session_scope() as session:
+                session.add(KbVote(kb_id=kb_id, user_id=user_id, vote=vote))
+        except SQLAlchemyError:
+            logger.exception("Failed to register vote")
+            raise DatabaseError("Could not register vote")
+
+    # ---------- Статистика KB ----------
+    def get_kb_stats(self) -> dict:
+        """Возвращает статистику по базе знаний."""
+        try:
+            with session_scope() as session:
+                rows = session.scalars(select(KnowledgeBase)).all()
+                total = len(rows)
+                if total == 0:
+                    return {
+                        "total": 0, "avg_rating": 0.0,
+                        "top": [], "negative": [], "deleted_ready": 0,
+                    }
+                ratings = [r.rating or 0 for r in rows]
+                avg = sum(ratings) / total
+                top = sorted(
+                    rows, key=lambda r: (r.rating or 0), reverse=True
+                )[:5]
+                top_data = [
+                    {"id": r.id, "problem": r.problem_text[:60], "rating": r.rating or 0}
+                    for r in top
+                ]
+                negative = [
+                    {"id": r.id, "problem": r.problem_text[:60], "rating": r.rating or 0}
+                    for r in rows if (r.rating or 0) < 0
+                ]
+                ready = sum(1 for r in rows if (r.rating or 0) <= -2)
+                return {
+                    "total": total, "avg_rating": round(avg, 2),
+                    "top": top_data, "negative": negative, "deleted_ready": ready,
+                }
+        except SQLAlchemyError:
+            logger.exception("Failed to get KB stats")
+            raise DatabaseError("Could not get KB stats")
 
     # ---------- Seed ----------
     def seed_if_empty(self, keywords: list[str], responsible: list[str]) -> None:
