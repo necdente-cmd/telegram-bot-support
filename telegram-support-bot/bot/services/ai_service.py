@@ -23,7 +23,6 @@ _MARKDOWN_PATTERNS = (
 
 
 def strip_markdown(text: str) -> str:
-    """Remove common Markdown markers so Telegram shows plain text."""
     cleaned = text
     for pattern, replacement in _MARKDOWN_PATTERNS:
         cleaned = pattern.sub(replacement, cleaned)
@@ -31,8 +30,6 @@ def strip_markdown(text: str) -> str:
 
 
 class AiService:
-    """Thin wrapper around the OpenAI SDK pointed at DeepSeek (or compatible)."""
-
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._client: OpenAI | None = None
@@ -55,7 +52,6 @@ class AiService:
         return self._client is not None
 
     def ask(self, question: str) -> str:
-        """Send a user question to the model and return a plain-text answer."""
         if self._client is None:
             raise ExternalAPIError("AI is not configured")
         try:
@@ -83,3 +79,35 @@ class AiService:
         if not choice:
             raise ExternalAPIError("AI returned an empty response")
         return strip_markdown(choice)
+
+    def answer_with_context(self, question: str, context_solutions: list[str]) -> str:
+        """RAG: отвечает, используя найденные в базе знаний решения."""
+        if self._client is None:
+            raise ExternalAPIError("AI is not configured")
+
+        context = "\n\n".join(f"• {sol}" for sol in context_solutions)
+
+        try:
+            response = self._client.chat.completions.create(
+                model=self._settings.ai_model,
+                messages=[
+                    {"role": "system", "content": (
+                        "Ты — технический эксперт поддержки IT-системы Sanarip Clinic.\n"
+                        "Тебе дают вопрос пользователя и выдержки из базы знаний "
+                        "(ранее решённые похожие проблемы).\n"
+                        "Сформулируй КРАТКИЙ, точный и вежливый ответ на основе этих выдержек.\n"
+                        "Если выдержки не помогают — честно скажи, что не знаешь решения.\n"
+                        "Отвечай на том же языке, на котором задан вопрос."
+                    )},
+                    {"role": "user", "content": f"Вопрос: {question}\n\nИзвестные решения:\n{context}"},
+                ],
+            )
+            choice = response.choices[0].message.content if response.choices else None
+            if not choice:
+                raise ExternalAPIError("AI returned an empty response")
+            return strip_markdown(choice)
+        except ExternalAPIError:
+            raise
+        except Exception as exc:
+            logger.exception("RAG AI request failed")
+            raise ExternalAPIError("AI request failed") from exc
