@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 # ---------- Синонимы для поиска по смыслу без embeddings ----------
 SYNONYMS: dict[str, set[str]] = {
-    "зависает": {"катып", "жатат", "висит", "завис", "зависать", "тормозит", "фризит"},
+    "зависает": {"катып", "жатат", "висит", "завис", "зависать", "тормозит", "фризит", "глючит", "лагает", "лаги"},
     "катып": {"зависает", "жатат", "висит", "завис", "фризит"},
     "жатат": {"зависает", "катып"},
     "тормозит": {"зависает", "медленно", "жай", "иштейт", "лаг"},
@@ -50,7 +50,7 @@ SYNONYMS: dict[str, set[str]] = {
 
 
 def _stem(word: str) -> str:
-    """Грубый стемминг для русских/кыргызских слов: убираем частые окончания."""
+    """Грубый стемминг: убираем частые окончания."""
     if len(word) <= 4:
         return word
     for suffix in (
@@ -73,7 +73,6 @@ def _extract_words(text: str) -> set[str]:
             continue
         stemmed = _stem(w)
         result.add(stemmed)
-        # Добавляем синонимы (и их стемы)
         for syn in SYNONYMS.get(w, set()):
             if len(syn) > 3:
                 result.add(_stem(syn))
@@ -218,21 +217,28 @@ class SupportRepository:
             raise DatabaseError("Could not list banned users") from exc
 
     # ---------- Knowledge Base (RAG) ----------
-    def add_solution(self, problem_text: str, solution_text: str) -> None:
+    def add_solution(self, problem_text: str, solution_text: str) -> int:
+        """Сохраняет решение. Возвращает id новой записи."""
         keywords = " ".join(_extract_words(problem_text))
         try:
             with session_scope() as session:
-                session.add(KnowledgeBase(
+                kb = KnowledgeBase(
                     problem_text=problem_text,
                     solution_text=solution_text,
                     keywords=keywords,
-                ))
+                    rating=0,
+                )
+                session.add(kb)
+                session.flush()
+                return kb.id
         except SQLAlchemyError as exc:
             logger.exception("Failed to add knowledge base entry")
             raise DatabaseError("Could not add solution") from exc
 
-    def search_solutions(self, query_text: str, min_matches: int = 1, limit: int = 3) -> list[str]:
-        """Взвешенный поиск: редкие совпадения весят больше, чем частые."""
+    def search_solutions(
+        self, query_text: str, min_matches: int = 1, limit: int = 3
+    ) -> list[tuple[int, str]]:
+        """Взвешенный поиск. Возвращает список (kb_id, solution_text)."""
         query_words = _extract_words(query_text)
         if not query_words:
             return []
@@ -242,37 +248,65 @@ class SupportRepository:
                 if not rows:
                     return []
 
-                # Считаем частоту слов во всей базе (IDF)
+                # IDF: считаем частоту слов во всей базе
                 all_kb_words: dict[str, int] = {}
-                parsed: list[tuple[object, set[str]]] = []
+                parsed: list[tuple[KnowledgeBase, set[str]]] = []
                 for row in rows:
                     kb_words = set((row.keywords or "").split())
                     parsed.append((row, kb_words))
                     for w in kb_words:
                         all_kb_words[w] = all_kb_words.get(w, 0) + 1
 
-                # Взвешенный счёт для каждой записи
-                scored: list[tuple[float, str]] = []
-                total_docs = len(parsed)
+                scored: list[tuple[float, int, str]] = []
                 for row, kb_words in parsed:
                     common = query_words & kb_words
                     if not common:
                         continue
                     score = 0.0
                     for w in common:
-                        # IDF: редкое слово = высокий вес
                         idf = 1.0 + (1.0 / max(all_kb_words.get(w, 1), 1))
                         score += idf
-                    # Бонус за количество совпадений
                     score += 0.5 * (len(common) - 1)
-                    scored.append((score, row.solution_text))
+                    scored.append((score, row.id, row.solution_text))
 
                 scored.sort(reverse=True, key=lambda x: x[0])
-                # Возвращаем только те, у кого score > порога
-                return [sol for sc, sol in scored[:limit] if sc > 1.0]
+                return [(kb_id, sol) for sc, kb_id, sol in scored[:limit] if sc > 1.0]
         except SQLAlchemyError as exc:
             logger.exception("Failed to search solutions")
             raise DatabaseError("Could not search solutions") from exc
+
+    def get_kb_by_id(self, kb_id: int) -> KnowledgeBase | None:
+        try:
+            with session_scope() as session:
+                row = session.get(KnowledgeBase, kb_id)
+                if row is None:
+                    return None
+                return KnowledgeBase(
+                    id=row.id, problem_text=row.problem_text,
+                    solution_text=row.solution_text, keywords=row.keywords,
+                    rating=row.rating, created_at=row.created_at,
+                )
+        except SQLAlchemyError as exc:
+            logger.exception("Failed to get kb entry %s", kb_id)
+            raise DatabaseError("Could not get kb entry") from exc
+
+    def rate_kb(self, kb_id: int, delta: int) -> int:
+        """Меняет рейтинг записи. Возвращает новый рейтинг. Если <= -3 — удаляет."""
+        try:
+            with session_scope() as session:
+                row = session.get(KnowledgeBase, kb_id)
+                if row is None:
+                    return 0
+                row.rating = (row.rating or 0) + delta
+                new_rating = row.rating
+                if new_rating <= -3:
+                    session.delete(row)
+                    logger.info("KB #%s удалён (рейтинг %s)", kb_id, new_rating)
+                    return -999  # маркер что удалён
+                return new_rating
+        except SQLAlchemyError as exc:
+            logger.exception("Failed to rate kb %s", kb_id)
+            raise DatabaseError("Could not rate kb") from exc
 
     def list_all_kb(self, limit: int = 20) -> list[KnowledgeBase]:
         try:
@@ -286,7 +320,7 @@ class SupportRepository:
                     KnowledgeBase(
                         id=r.id, problem_text=r.problem_text,
                         solution_text=r.solution_text, keywords=r.keywords,
-                        created_at=r.created_at,
+                        rating=r.rating, created_at=r.created_at,
                     ) for r in rows
                 ]
         except SQLAlchemyError as exc:
