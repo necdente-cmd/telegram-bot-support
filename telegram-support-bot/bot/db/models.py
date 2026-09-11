@@ -40,6 +40,7 @@ class KnowledgeBase(Base):
     problem_text: Mapped[str] = mapped_column(Text, nullable=False)
     solution_text: Mapped[str] = mapped_column(Text, nullable=False)
     keywords: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    rating: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False,
     )
