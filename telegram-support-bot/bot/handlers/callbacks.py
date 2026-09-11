@@ -52,12 +52,7 @@ async def advice_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def kb_rating_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Оценка RAG-ответа.
-
-    👍 = +1 к рейтингу записи
-    👎 = -1 к рейтингу + эскалация ответственному (для автообучения)
-    При рейтинге <= -3 запись удаляется.
-    """
+    """Оценка RAG-ответа с защитой от повторного голосования."""
     query = update.callback_query
     if query is None:
         return
@@ -74,14 +69,32 @@ async def kb_rating_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except (ValueError, AttributeError):
         return
 
+    user_id = query.from_user.id if query.from_user else 0
+    if user_id == 0:
+        return
+
+    # 🔒 Защита: один голос на пользователя на запись
+    try:
+        if repo_of(context).has_voted_kb(kb_id, user_id):
+            await query.answer(
+                "⚠️ Вы уже голосовали за это решение.",
+                show_alert=True,
+            )
+            return
+    except DatabaseError:
+        logger.exception("Failed to check vote")
+        return
+
     try:
         if action == "kb_helpful":
+            repo_of(context).register_kb_vote(kb_id, user_id, +1)
             new_rating = repo_of(context).rate_kb(kb_id, +1)
             await query.edit_message_reply_markup(reply_markup=None)
             await query.answer("✅ Спасибо! Решение получило +1", show_alert=False)
-            logger.info("KB #%s rated +1, new rating %s", kb_id, new_rating)
+            logger.info("KB #%s rated +1 by user %s, new rating %s", kb_id, user_id, new_rating)
 
         elif action == "kb_nothelpful":
+            repo_of(context).register_kb_vote(kb_id, user_id, -1)
             new_rating = repo_of(context).rate_kb(kb_id, -1)
             await query.edit_message_reply_markup(reply_markup=None)
 
@@ -93,11 +106,10 @@ async def kb_rating_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 logger.info("KB #%s deleted after too many dislikes", kb_id)
             else:
                 await query.answer("🔄 Передаю ответственному...", show_alert=False)
-                logger.info("KB #%s rated -1, new rating %s", kb_id, new_rating)
+                logger.info("KB #%s rated -1 by user %s, new rating %s", kb_id, user_id, new_rating)
 
-            # Отправляем эскалацию в группу
+            # Эскалация
             user = query.from_user
-            # Пробуем достать текст проблемы из user_data, потом из bot_data
             problem = str(context.user_data.get("last_problem_text", ""))
             if not problem:
                 problem = context.bot_data.get("last_problem_by_chat", {}).get(
