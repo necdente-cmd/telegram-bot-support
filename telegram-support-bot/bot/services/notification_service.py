@@ -21,10 +21,22 @@ class NotificationService:
         self._settings = settings
         self._repository = repository
 
-    async def notify_group(self, bot: Bot, text: str) -> None:
-        """Send a raw message to GROUP_CHAT_ID."""
+    async def notify_group(
+        self,
+        bot: Bot,
+        text: str,
+        parse_mode: str | None = None,
+    ) -> None:
+        """Send a message to GROUP_CHAT_ID.
+
+        `parse_mode` — необязательный ("HTML" или "Markdown"). Если не задан,
+        отправляется обычный текст (безопасно для любого контента).
+        """
+        kwargs = {}
+        if parse_mode:
+            kwargs["parse_mode"] = parse_mode
         try:
-            await bot.send_message(chat_id=self._settings.group_chat_id, text=text)
+            await bot.send_message(chat_id=self._settings.group_chat_id, text=text, **kwargs)
         except RetryAfter as exc:
             logger.warning("Telegram flood wait %ss while notifying group", exc.retry_after)
             raise ExternalAPIError("Telegram rate-limited the bot") from exc
@@ -44,12 +56,7 @@ class NotificationService:
         kind: str,
         context=None,
     ) -> None:
-        """Mention responsible users about a help request or failed advice.
-
-        Параметр `context` (ContextTypes.DEFAULT_TYPE) нужен, чтобы сохранить
-        связь между message_id эскалации и текстом проблемы — это используется
-        для автообучения, когда ответственный отвечает реплаем.
-        """
+        """Mention responsible users about a help request or failed advice."""
         display = f"@{username}" if username else "без юзернейма"
         try:
             responsible = self._repository.list_responsible()
@@ -87,7 +94,6 @@ class NotificationService:
             logger.exception("Telegram error while notifying group: %s", exc)
             raise ExternalAPIError("Could not send Telegram message") from exc
 
-        # Сохраняем связь message_id → problem_text для автообучения
         if context is not None and sent is not None:
             if "pending_escalations" not in context.bot_data:
                 context.bot_data["pending_escalations"] = {}
