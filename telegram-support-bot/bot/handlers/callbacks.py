@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 async def advice_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle «helped» / «did not help» buttons under an advice message."""
+    """Handle «helped» / «did not help» buttons under a fallback advice."""
     query = update.callback_query
     if query is None:
         return
@@ -28,19 +28,21 @@ async def advice_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     data = query.data or ""
     try:
         if data == "advice_helped":
-            await query.edit_message_text("✅ Отлично! Рады, что помогли.")
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.answer("✅ Отлично! Рады, что помогли.", show_alert=False)
             return
         if data == "advice_not_helped":
-            await query.edit_message_text(
-                "🔄 Ваш запрос принят. Сообщение отправлено аналитику системы."
-            )
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.answer("🔄 Передаю ответственному...", show_alert=False)
             user = query.from_user
+            problem = str(context.user_data.get("last_problem_text", ""))
             try:
                 await notifications_of(context).escalate(
                     context.bot,
                     username=user.username if user else None,
-                    body=str(context.user_data.get("last_problem_text", "")),
+                    body=problem,
                     kind="advice",
+                    context=context,
                 )
             except ExternalAPIError:
                 logger.error("Escalation after 'not helped' failed")
@@ -50,10 +52,11 @@ async def advice_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def kb_rating_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Оценка RAG-ответа: 👍 Помогло / 👎 Не помогло.
+    """Оценка RAG-ответа.
 
     👍 = +1 к рейтингу записи
-    👎 = -1 к рейтингу записи; при рейтинге <= -3 запись удаляется.
+    👎 = -1 к рейтингу + эскалация ответственному (для автообучения)
+    При рейтинге <= -3 запись удаляется.
     """
     query = update.callback_query
     if query is None:
@@ -77,21 +80,43 @@ async def kb_rating_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await query.edit_message_reply_markup(reply_markup=None)
             await query.answer("✅ Спасибо! Решение получило +1", show_alert=False)
             logger.info("KB #%s rated +1, new rating %s", kb_id, new_rating)
+
         elif action == "kb_nothelpful":
             new_rating = repo_of(context).rate_kb(kb_id, -1)
             await query.edit_message_reply_markup(reply_markup=None)
+
             if new_rating == -999:
                 await query.answer(
                     "🗑️ Спасибо! Решение удалено из базы как нерабочее.",
-                    show_alert=True,
+                    show_alert=False,
                 )
                 logger.info("KB #%s deleted after too many dislikes", kb_id)
             else:
-                await query.answer(
-                    f"❌ Спасибо! Рейтинг решения: {new_rating}",
-                    show_alert=False,
-                )
+                await query.answer("🔄 Передаю ответственному...", show_alert=False)
                 logger.info("KB #%s rated -1, new rating %s", kb_id, new_rating)
+
+            # Отправляем эскалацию в группу
+            user = query.from_user
+            # Пробуем достать текст проблемы из user_data, потом из bot_data
+            problem = str(context.user_data.get("last_problem_text", ""))
+            if not problem:
+                problem = context.bot_data.get("last_problem_by_chat", {}).get(
+                    query.message.chat_id, ""
+                )
+            if not problem:
+                problem = "(текст проблемы не сохранён)"
+
+            try:
+                await notifications_of(context).escalate(
+                    context.bot,
+                    username=user.username if user else None,
+                    body=problem,
+                    kind="advice",
+                    context=context,
+                )
+            except ExternalAPIError:
+                logger.error("Escalation after 'not helpful' failed")
+
     except DatabaseError:
         await query.answer("⚠️ Ошибка при сохранении оценки", show_alert=True)
         return
