@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from bot.config import Settings
 from bot.db.models import Base
 from bot.exceptions import DatabaseError
+
+logger = logging.getLogger(__name__)
 
 _engine: Engine | None = None
 _SessionLocal: sessionmaker[Session] | None = None
@@ -34,7 +37,6 @@ def init_engine(settings: Settings) -> Engine:
     url = settings.sqlalchemy_url
     connect_args = {}
     if url.startswith("sqlite"):
-        # Required for SQLite + threads used by the Telegram polling loop.
         connect_args["check_same_thread"] = False
 
     _engine = create_engine(
@@ -76,3 +78,24 @@ def session_scope() -> Iterator[Session]:
 def create_all_tables() -> None:
     """Fallback schema create used only if Alembic is unavailable."""
     Base.metadata.create_all(bind=get_engine())
+
+
+def ensure_columns() -> None:
+    """Добавляет недостающие колонки в существующие таблицы (idempotent).
+
+    SQLAlchemy `create_all` не умеет ALTER TABLE для уже созданных таблиц,
+    поэтому для SQLite делаем это вручную. Нужно при добавлении новых полей.
+    """
+    engine = get_engine()
+    try:
+        with engine.begin() as conn:
+            # Проверяем колонки в knowledge_base
+            result = conn.execute(text("PRAGMA table_info(knowledge_base)"))
+            existing = {row[1] for row in result.fetchall()}
+            if existing and "rating" not in existing:
+                conn.execute(
+                    text("ALTER TABLE knowledge_base ADD COLUMN rating INTEGER NOT NULL DEFAULT 0")
+                )
+                logger.info("Добавлена колонка 'rating' в knowledge_base")
+    except Exception as exc:
+        logger.error("ensure_columns failed (continuing): %s", exc)
