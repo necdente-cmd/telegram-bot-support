@@ -9,6 +9,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
+from bot.data.i18n import detect_language, t
 from bot.data.phrases import BOT_INFO_TEXT
 from bot.exceptions import DatabaseError, ExternalAPIError
 from bot.handlers.common import (
@@ -32,7 +33,6 @@ def _get_last_problem(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> str |
 
 
 async def _try_learn_from_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Если админ отвечает реплаем на сообщение бота — сохраняем решение."""
     message = update.message
     reply_to = message.reply_to_message
     if reply_to is None:
@@ -51,18 +51,15 @@ async def _try_learn_from_reply(update: Update, context: ContextTypes.DEFAULT_TY
     if len(solution_text) < 15 or solution_text.startswith("/"):
         return False
 
-    # Приоритет 1: связь msg_id → problem_text (сохранена при эскалации)
     pending = context.bot_data.get("pending_escalations", {})
     problem_text = pending.get(reply_to.message_id, "")
 
-    # Приоритет 2: парсим из текста эскалации
     if not problem_text:
         original = reply_to.text or ""
         match = _ESCALATION_RE.search(original)
         if match:
             problem_text = match.group(1).strip()
 
-    # Приоритет 3: последнее сообщение пользователя в этом чате
     if not problem_text:
         last = _get_last_problem(context, message.chat_id)
         if last:
@@ -73,11 +70,7 @@ async def _try_learn_from_reply(update: Update, context: ContextTypes.DEFAULT_TY
 
     try:
         repo_of(context).add_solution(problem_text, solution_text)
-        await safe_reply(
-            message,
-            "🧠 Спасибо! Я запомнил это решение и буду выдавать его автоматически "
-            "при похожих проблемах.",
-        )
+        await safe_reply(message, "🧠 Спасибо! Я запомнил это решение и буду выдавать его автоматически при похожих проблемах.")
         logger.info("Auto-learned solution for: %s", problem_text[:60])
         if reply_to.message_id in pending:
             del pending[reply_to.message_id]
@@ -94,11 +87,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     text = message.text
     user = message.from_user
     username = user.username if user else None
-    logger.info("Incoming text from %s (chat_id=%s): %s", username, message.chat_id, text)
+    lang = detect_language(text)
+    logger.info("Incoming text from %s (chat_id=%s, lang=%s): %s", username, message.chat_id, lang, text)
 
     try:
         if user and repo_of(context).is_banned(user.id):
-            await safe_reply(message, "⛔ Вы забанены.")
+            await safe_reply(message, t("banned", lang))
             return
     except DatabaseError:
         logger.error("Ban check failed; allowing message through")
@@ -119,27 +113,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     if matcher.is_technical_works(text):
-        await safe_reply(
-            message,
-            "🛠 Ведутся технические работы. Пожалуйста, подождите немного.\n"
-            "Если проблема останется, обратитесь к ответственному.",
-        )
+        await safe_reply(message, t("tech_works", lang))
         return
 
     if matcher.is_help_request(text):
         logger.info("Help request recognized")
         _remember_problem(context, message.chat_id, text)
-        await safe_reply(
-            message,
-            "🆘 Я вас понял! Сейчас передам сообщение ответственному.\n"
-            "Пожалуйста, опишите проблему подробнее, если не сделали этого ранее.",
-        )
+        await safe_reply(message, t("help_request", lang))
+        if user:
+            try:
+                repo_of(context).log_message(
+                    user_id=user.id, username=username, chat_id=message.chat_id,
+                    text=text, matched_kb_id=None, answered_by_rag=0,
+                )
+            except Exception:
+                pass
         try:
             await notifications_of(context).escalate(
                 context.bot, username=username, body=text, kind="help", context=context,
             )
         except ExternalAPIError:
-            await safe_reply(message, "⚠️ Не удалось отправить уведомление. Попробуйте позже.")
+            await safe_reply(message, t("notify_failed", lang))
         return
 
     if matcher.matches_keyword(text):
@@ -160,11 +154,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 answer = ai.answer_with_context(text, [sol for _, sol in solutions])
                 keyboard = InlineKeyboardMarkup(
                     [[
-                        InlineKeyboardButton("👍 Помогло", callback_data=f"kb_helpful:{top_id}"),
-                        InlineKeyboardButton("👎 Не помогло", callback_data=f"kb_nothelpful:{top_id}"),
+                        InlineKeyboardButton(t("btn_kb_helpful", lang), callback_data=f"kb_helpful:{top_id}"),
+                        InlineKeyboardButton(t("btn_kb_nothelpful", lang), callback_data=f"kb_nothelpful:{top_id}"),
                     ]]
                 )
                 await message.reply_text(f"✅ {answer}", reply_markup=keyboard)
+                if user:
+                    try:
+                        repo_of(context).log_message(
+                            user_id=user.id, username=username, chat_id=message.chat_id,
+                            text=text, matched_kb_id=top_id, answered_by_rag=1,
+                        )
+                    except Exception:
+                        pass
                 return
             except ExternalAPIError:
                 logger.warning("RAG AI failed, falling back to advice")
@@ -181,16 +183,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         keyboard = InlineKeyboardMarkup(
             [[
-                InlineKeyboardButton("✅ Помогло", callback_data="advice_helped"),
-                InlineKeyboardButton("❌ Не помогло", callback_data="advice_not_helped"),
+                InlineKeyboardButton(t("btn_helped", lang), callback_data="advice_helped"),
+                InlineKeyboardButton(t("btn_not_helped", lang), callback_data="advice_not_helped"),
             ]]
         )
         try:
             await message.reply_text(
-                f"🧠 Совет по решению:\n{advice}\n\n"
-                "Если совет помог, нажмите «Помогло». Если нет — мы отправим запрос аналитику.",
+                f"{t('advice_header', lang)}\n{advice}\n\n{t('advice_footer', lang)}",
                 reply_markup=keyboard,
             )
+            if user:
+                try:
+                    repo_of(context).log_message(
+                        user_id=user.id, username=username, chat_id=message.chat_id,
+                        text=text, matched_kb_id=None, answered_by_rag=0,
+                    )
+                except Exception:
+                    pass
         except TelegramError:
             logger.exception("Failed to send advice reply")
         return
