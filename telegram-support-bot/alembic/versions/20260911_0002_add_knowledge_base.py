@@ -17,23 +17,22 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.create_table(
-        "knowledge_base",
-        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
-        sa.Column("problem_text", sa.Text(), nullable=False),
-        sa.Column("solution_text", sa.Text(), nullable=False),
-        sa.Column("keywords", sa.Text(), nullable=False, server_default=""),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.func.now(),
-            nullable=False,
-        ),
-        sa.PrimaryKeyConstraint("id"),
+    # Используем IF NOT EXISTS, чтобы миграция не падала,
+    # если таблица уже была частично создана при предыдущем запуске.
+    op.execute("""
+        CREATE TABLE IF NOT EXISTS knowledge_base (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            problem_text TEXT NOT NULL,
+            solution_text TEXT NOT NULL,
+            keywords TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS idx_kb_keywords ON knowledge_base(keywords)"
     )
-    op.create_index("idx_kb_keywords", "knowledge_base", ["keywords"], unique=False)
 
 
 def downgrade() -> None:
-    op.drop_index("idx_kb_keywords", table_name="knowledge_base")
-    op.drop_table("knowledge_base")
+    op.execute("DROP INDEX IF EXISTS idx_kb_keywords")
+    op.execute("DROP TABLE IF EXISTS knowledge_base")
