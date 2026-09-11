@@ -244,3 +244,15 @@ async def stats_kb_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             lines.append(f"  #{item['id']} (⭐{item['rating']}): {item['problem']}")
 
     await safe_reply(update.message, "\n".join(lines))
+    
+
+async def report_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Админ: /report_now — отправить отчёт за сутки прямо сейчас."""
+    from bot.jobs import daily_report
+    try:
+        await daily_report(context)
+    except Exception as exc:
+        logger.exception("Manual report failed")
+        await safe_reply(update.message, f"❌ Не удалось отправить отчёт: {exc}")
+        return
+    await safe_reply(update.message, "✅ Отчёт отправлен в группу.")
