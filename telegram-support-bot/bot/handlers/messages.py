@@ -73,7 +73,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         # 🧠 RAG: сначала ищем готовое решение в базе знаний
         try:
-            solutions = repo_of(context).search_solutions(text, min_matches=2, limit=3)
+            solutions = repo_of(context).search_solutions(text, min_matches=1, limit=3)
         except DatabaseError:
             solutions = []
 
