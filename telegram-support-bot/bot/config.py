@@ -11,7 +11,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from bot.exceptions import ConfigurationError
 
-# Project root (parent of the `bot` package).
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
@@ -30,6 +29,7 @@ class Settings(BaseSettings):
     admin_ids: list[int]
     bot_username: str = "oz_support_bot"
     morning_time_utc: str = "03:00"
+    daily_report_time_utc: str = "16:00"
 
     database_url: str = "sqlite:///support.db"
 
@@ -78,12 +78,10 @@ class Settings(BaseSettings):
 
     @property
     def sqlalchemy_url(self) -> str:
-        """Return DATABASE_URL with relative SQLite paths resolved against the project root."""
         url = self.database_url
         if not url.startswith("sqlite:///"):
             return url
         rest = url[len("sqlite:///"):]
-        # Unix absolute (sqlite:////tmp/db) or Windows drive (sqlite:///C:/...).
         is_absolute = rest.startswith("/") or (len(rest) > 1 and rest[1] == ":")
         if is_absolute:
             return url
@@ -98,11 +96,9 @@ class Settings(BaseSettings):
         return path
 
     def is_admin(self, user_id: int | None) -> bool:
-        """Return True if the Telegram user may run admin commands."""
         return user_id is not None and user_id in self.admin_ids
 
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """Load settings once. Raises ValidationError if required fields are missing."""
     return Settings()
