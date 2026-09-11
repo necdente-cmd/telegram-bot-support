@@ -1,21 +1,20 @@
-"""Alembic helpers and application bootstrap."""
+"""Application bootstrap. Tables are ensured via SQLAlchemy metadata (no Alembic at runtime)."""
 
 from __future__ import annotations
 
 import logging
 
-from alembic import command
-from alembic.config import Config
 from telegram.ext import Application, CallbackQueryHandler, MessageHandler, filters
 
-from bot.config import BASE_DIR, Settings, get_settings
+from bot.config import Settings, get_settings
 from bot.data.phrases import DEFAULT_RESPONSIBLE, INITIAL_KEYWORDS
-from bot.db.engine import init_engine
+from bot.db.engine import create_all_tables, init_engine
 from bot.db.repository import SupportRepository
 from bot.domain.matching import AdviceService, MessageMatcher
 from bot.handlers.callbacks import advice_callback
 from bot.handlers.errors import on_error
 from bot.handlers.messages import handle_message
+from bot.health import start_health_server
 from bot.jobs import schedule_jobs
 from bot.logging_setup import configure_logging
 from bot.services.ai_service import AiService
@@ -23,25 +22,6 @@ from bot.services.command_registry import CommandRegistry
 from bot.services.notification_service import NotificationService
 
 logger = logging.getLogger(__name__)
-
-
-def run_migrations(settings: Settings) -> None:
-    """Apply Alembic migrations up to head (creates tables on a fresh database).
-
-    ВАЖНО: эта функция должна вызываться ДО init_engine(), иначе SQLAlchemy
-    держит соединение с SQLite и блокирует запись для Alembic (deadlock).
-    """
-    ini_path = BASE_DIR / "alembic.ini"
-    if not ini_path.exists():
-        raise FileNotFoundError(f"alembic.ini is missing at {ini_path}")
-    cfg = Config(str(ini_path))
-    cfg.set_main_option("sqlalchemy.url", settings.sqlalchemy_url)
-    try:
-        command.upgrade(cfg, "head")
-        logger.info("Database migrations applied")
-    except Exception as exc:
-        # Не роняем бота из-за миграции — логируем и продолжаем.
-        logger.error("Migration failed (continuing anyway): %s", exc)
 
 
 async def _post_init(application: Application) -> None:
@@ -52,11 +32,18 @@ async def _post_init(application: Application) -> None:
 
 def build_application(settings: Settings) -> Application:
     """Wire handlers, services, and the Telegram Application."""
-    # 1. Миграции ПЕРВЫМИ — пока нет соединения SQLAlchemy, которое держит блокировку.
-    run_migrations(settings)
-    # 2. Только теперь создаём engine для самого бота.
+    # 1. Создаём engine.
     init_engine(settings)
+    # 2. Создаём/обновляем таблицы через SQLAlchemy metadata.
+    #    CREATE TABLE IF NOT EXISTS — существующие данные не трогаются,
+    #    новые таблицы (knowledge_base) добавляются автоматически.
+    try:
+        create_all_tables()
+        logger.info("Database tables ensured via SQLAlchemy metadata")
+    except Exception as exc:
+        logger.exception("Failed to create tables: %s", exc)
 
+    # 3. Данные и сервисы.
     repository = SupportRepository()
     repository.seed_if_empty(INITIAL_KEYWORDS, DEFAULT_RESPONSIBLE)
     keywords = repository.list_keywords()
@@ -97,9 +84,16 @@ def build_application(settings: Settings) -> Application:
 
 
 def run() -> None:
-    """CLI entry: configure logging, build the app, start polling."""
+    """CLI entry: configure logging, start health server, build the app, start polling."""
     settings = get_settings()
     configure_logging(settings)
     logger.info("Starting support bot")
+
+    # Запускаем healthcheck-сервер ДО старта бота, чтобы Railway сразу
+    # видел живой контейнер.
+    start_health_server()
+
     application = build_application(settings)
+    # drop_pending_updates=False — не теряем сообщения, пришедшие во время
+    # перезапуска контейнера.
     application.run_polling(drop_pending_updates=False)
