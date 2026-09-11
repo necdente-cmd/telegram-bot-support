@@ -81,15 +81,15 @@ def create_all_tables() -> None:
 
 
 def ensure_columns() -> None:
-    """Добавляет недостающие колонки в существующие таблицы (idempotent).
+    """Добавляет недостающие колонки/таблицы (idempotent).
 
     SQLAlchemy `create_all` не умеет ALTER TABLE для уже созданных таблиц,
-    поэтому для SQLite делаем это вручную. Нужно при добавлении новых полей.
+    поэтому для SQLite делаем это вручную.
     """
     engine = get_engine()
     try:
         with engine.begin() as conn:
-            # Проверяем колонки в knowledge_base
+            # knowledge_base: rating
             result = conn.execute(text("PRAGMA table_info(knowledge_base)"))
             existing = {row[1] for row in result.fetchall()}
             if existing and "rating" not in existing:
@@ -97,5 +97,18 @@ def ensure_columns() -> None:
                     text("ALTER TABLE knowledge_base ADD COLUMN rating INTEGER NOT NULL DEFAULT 0")
                 )
                 logger.info("Добавлена колонка 'rating' в knowledge_base")
+
+            # kb_votes — на всякий случай (если create_all пропустит)
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS kb_votes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kb_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    vote INTEGER NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(kb_id, user_id)
+                )
+            """))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_kb_votes_kb_id ON kb_votes(kb_id)"))
     except Exception as exc:
         logger.error("ensure_columns failed (continuing): %s", exc)
