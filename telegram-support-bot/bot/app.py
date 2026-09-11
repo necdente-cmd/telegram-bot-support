@@ -26,14 +26,22 @@ logger = logging.getLogger(__name__)
 
 
 def run_migrations(settings: Settings) -> None:
-    """Apply Alembic migrations up to head (creates tables on a fresh database)."""
+    """Apply Alembic migrations up to head (creates tables on a fresh database).
+
+    ВАЖНО: эта функция должна вызываться ДО init_engine(), иначе SQLAlchemy
+    держит соединение с SQLite и блокирует запись для Alembic (deadlock).
+    """
     ini_path = BASE_DIR / "alembic.ini"
     if not ini_path.exists():
         raise FileNotFoundError(f"alembic.ini is missing at {ini_path}")
     cfg = Config(str(ini_path))
     cfg.set_main_option("sqlalchemy.url", settings.sqlalchemy_url)
-    command.upgrade(cfg, "head")
-    logger.info("Database migrations applied")
+    try:
+        command.upgrade(cfg, "head")
+        logger.info("Database migrations applied")
+    except Exception as exc:
+        # Не роняем бота из-за миграции — логируем и продолжаем.
+        logger.error("Migration failed (continuing anyway): %s", exc)
 
 
 async def _post_init(application: Application) -> None:
@@ -44,8 +52,10 @@ async def _post_init(application: Application) -> None:
 
 def build_application(settings: Settings) -> Application:
     """Wire handlers, services, and the Telegram Application."""
-    init_engine(settings)
+    # 1. Миграции ПЕРВЫМИ — пока нет соединения SQLAlchemy, которое держит блокировку.
     run_migrations(settings)
+    # 2. Только теперь создаём engine для самого бота.
+    init_engine(settings)
 
     repository = SupportRepository()
     repository.seed_if_empty(INITIAL_KEYWORDS, DEFAULT_RESPONSIBLE)
@@ -67,9 +77,13 @@ def build_application(settings: Settings) -> Application:
     application.bot_data["notifications"] = NotificationService(settings, repository)
     application.bot_data["ai"] = AiService(settings)
 
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message), group=0)
     application.add_handler(
-        CallbackQueryHandler(advice_callback, pattern=r"^(advice_helped|advice_not_helped)$"),
+        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message), group=0
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            advice_callback, pattern=r"^(advice_helped|advice_not_helped)$"
+        ),
         group=2,
     )
 
