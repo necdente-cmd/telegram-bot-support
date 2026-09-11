@@ -14,7 +14,6 @@ logger = logging.getLogger(__name__)
 
 
 async def add_keyword_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Add a phrase that should trigger troubleshooting advice."""
     if not context.args:
         await safe_reply(update.message, "Укажите ключевое слово: /add_keyword система не работает")
         return
@@ -32,11 +31,8 @@ async def add_keyword_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def remove_keyword_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Remove a keyword phrase."""
     if not context.args:
-        await safe_reply(
-            update.message, "Укажите ключевое слово: /remove_keyword система не работает"
-        )
+        await safe_reply(update.message, "Укажите ключевое слово: /remove_keyword система не работает")
         return
     keyword = " ".join(context.args).strip().lower()
     try:
@@ -52,7 +48,6 @@ async def remove_keyword_command(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def add_responsible_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Add a Telegram username (without requiring @) to the escalation list."""
     if not context.args:
         await safe_reply(update.message, "Укажите юзернейм: /add_responsible @username")
         return
@@ -69,7 +64,6 @@ async def add_responsible_command(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def remove_responsible_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Remove a username from the escalation list."""
     if not context.args:
         await safe_reply(update.message, "Укажите юзернейм: /remove_responsible @username")
         return
@@ -86,7 +80,6 @@ async def remove_responsible_command(update: Update, context: ContextTypes.DEFAU
 
 
 async def ban_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Ban a user by numeric Telegram ID."""
     if not context.args:
         await safe_reply(update.message, "Укажите ID пользователя: /ban_user 123456789")
         return
@@ -104,7 +97,6 @@ async def ban_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def unban_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Remove a ban by numeric Telegram ID."""
     if not context.args:
         await safe_reply(update.message, "Укажите ID пользователя: /unban_user 123456789")
         return
@@ -125,7 +117,6 @@ async def unban_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def list_banned_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """List currently banned user IDs."""
     try:
         rows = repo_of(context).list_banned()
     except DatabaseError:
@@ -143,7 +134,6 @@ async def list_banned_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def reload_commands_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Re-read commands.yaml and re-bind slash-command handlers without restarting."""
     registry = context.bot_data.get("command_registry")
     if registry is None:
         await safe_reply(update.message, "❌ Реестр команд недоступен.")
@@ -155,3 +145,64 @@ async def reload_commands_command(update: Update, context: ContextTypes.DEFAULT_
         await safe_reply(update.message, "❌ Не удалось перезагрузить команды. Смотрите логи.")
         return
     await safe_reply(update.message, f"✅ Команды перезагружены ({count} шт.).")
+
+
+# ---------- База знаний (RAG) ----------
+async def add_solution_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Админ: /add_solution проблема | решение"""
+    if not context.args:
+        await safe_reply(
+            update.message,
+            "Формат: /add_solution проблема | решение\n"
+            "Пример: /add_solution база зависла | перезагрузите компьютер и проверьте интернет",
+        )
+        return
+    full_text = " ".join(context.args)
+    if "|" not in full_text:
+        await safe_reply(update.message, "Разделите проблему и решение знаком |")
+        return
+    problem, solution = full_text.split("|", 1)
+    problem, solution = problem.strip(), solution.strip()
+    if not problem or not solution:
+        await safe_reply(update.message, "И проблема, и решение должны быть непустыми.")
+        return
+    try:
+        repo_of(context).add_solution(problem, solution)
+    except DatabaseError:
+        await safe_reply(update.message, "❌ Не удалось сохранить запись.")
+        return
+    await safe_reply(update.message, "✅ Запись добавлена в базу знаний.")
+
+
+async def list_kb_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Админ: /list_kb — показать базу знаний."""
+    try:
+        rows = repo_of(context).list_all_kb(limit=20)
+        total = repo_of(context).count_kb()
+    except DatabaseError:
+        await safe_reply(update.message, "❌ Не удалось прочитать базу знаний.")
+        return
+    if not rows:
+        await safe_reply(update.message, "База знаний пуста.")
+        return
+    response = f"📚 База знаний (всего: {total}):\n\n"
+    for r in rows:
+        response += f"#{r.id}: {r.problem_text[:60]}\n→ {r.solution_text[:80]}\n\n"
+    await safe_reply(update.message, response[:4000])
+
+
+async def delete_kb_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Админ: /delete_kb <id>"""
+    if not context.args or not context.args[0].isdigit():
+        await safe_reply(update.message, "Использование: /delete_kb <id>")
+        return
+    kb_id = int(context.args[0])
+    try:
+        removed = repo_of(context).delete_kb(kb_id)
+    except DatabaseError:
+        await safe_reply(update.message, "❌ Не удалось удалить запись.")
+        return
+    if not removed:
+        await safe_reply(update.message, f"Запись #{kb_id} не найдена.")
+        return
+    await safe_reply(update.message, f"✅ Запись #{kb_id} удалена.")
