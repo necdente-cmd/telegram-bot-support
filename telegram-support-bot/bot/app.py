@@ -8,10 +8,10 @@ from telegram.ext import Application, CallbackQueryHandler, MessageHandler, filt
 
 from bot.config import Settings, get_settings
 from bot.data.phrases import DEFAULT_RESPONSIBLE, INITIAL_KEYWORDS
-from bot.db.engine import create_all_tables, init_engine
+from bot.db.engine import create_all_tables, ensure_columns, init_engine
 from bot.db.repository import SupportRepository
 from bot.domain.matching import AdviceService, MessageMatcher
-from bot.handlers.callbacks import advice_callback
+from bot.handlers.callbacks import advice_callback, kb_rating_callback
 from bot.handlers.errors import on_error
 from bot.handlers.messages import handle_message
 from bot.health import start_health_server
@@ -32,18 +32,14 @@ async def _post_init(application: Application) -> None:
 
 def build_application(settings: Settings) -> Application:
     """Wire handlers, services, and the Telegram Application."""
-    # 1. Создаём engine.
     init_engine(settings)
-    # 2. Создаём/обновляем таблицы через SQLAlchemy metadata.
-    #    CREATE TABLE IF NOT EXISTS — существующие данные не трогаются,
-    #    новые таблицы (knowledge_base) добавляются автоматически.
     try:
         create_all_tables()
+        ensure_columns()  # аккуратно добавляем новые колонки (rating) в существующие таблицы
         logger.info("Database tables ensured via SQLAlchemy metadata")
     except Exception as exc:
         logger.exception("Failed to create tables: %s", exc)
 
-    # 3. Данные и сервисы.
     repository = SupportRepository()
     repository.seed_if_empty(INITIAL_KEYWORDS, DEFAULT_RESPONSIBLE)
     keywords = repository.list_keywords()
@@ -73,6 +69,12 @@ def build_application(settings: Settings) -> Application:
         ),
         group=2,
     )
+    application.add_handler(
+        CallbackQueryHandler(
+            kb_rating_callback, pattern=r"^kb_(helpful|nothelpful):\d+$"
+        ),
+        group=2,
+    )
 
     registry = CommandRegistry(settings)
     registry.register(application)
@@ -88,12 +90,6 @@ def run() -> None:
     settings = get_settings()
     configure_logging(settings)
     logger.info("Starting support bot")
-
-    # Запускаем healthcheck-сервер ДО старта бота, чтобы Railway сразу
-    # видел живой контейнер.
     start_health_server()
-
     application = build_application(settings)
-    # drop_pending_updates=False — не теряем сообщения, пришедшие во время
-    # перезапуска контейнера.
     application.run_polling(drop_pending_updates=False)
