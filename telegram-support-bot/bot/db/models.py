@@ -47,12 +47,13 @@ class KnowledgeBase(Base):
 
 
 class KbVote(Base):
-    """Голоса пользователей за записи базы знаний."""
+    """Голоса пользователей за записи базы знаний (1 голос на пользователя на запись)."""
     __tablename__ = "kb_votes"
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     kb_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     user_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    vote: Mapped[int] = mapped_column(Integer, nullable=False)
+    vote: Mapped[int] = mapped_column(Integer, nullable=False)  # +1 или -1
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False,
     )
