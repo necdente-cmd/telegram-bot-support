@@ -54,13 +54,12 @@ async def advice_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def kb_rating_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Оценка RAG-ответа с защитой от повторного голосования."""
+    """Оценка RAG-ответа. Защита от дублирования убрана — каждый клик меняет рейтинг."""
     query = update.callback_query
     if query is None:
         logger.warning("kb_rating_callback: query is None")
         return
 
-    # ВАЖНО: логируем СРАЗУ, до всего остального
     logger.info(
         "kb_rating_callback: data=%s user_id=%s",
         query.data,
@@ -86,62 +85,39 @@ async def kb_rating_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.warning("user_id is 0 in kb_rating_callback")
         return
 
-    # 🔒 Защита: один голос на пользователя на запись
-    try:
-        already_voted = repo_of(context).has_voted_kb(kb_id, user_id)
-    except Exception as exc:
-        logger.exception("has_voted_kb failed: %s", exc)
-        already_voted = False  # при ошибке — разрешаем голосовать
-
-    if already_voted:
-        try:
-            await query.answer("⚠️ Вы уже голосовали за это решение.", show_alert=True)
-        except TelegramError:
-            pass
-        return
-
     try:
         if action == "kb_helpful":
-            try:
-                repo_of(context).register_kb_vote(kb_id, user_id, +1)
-            except DatabaseError as exc:
-                logger.warning("register_kb_vote failed: %s", exc)
             new_rating = repo_of(context).rate_kb(kb_id, +1)
+            # НЕ убираем клавиатуру — можно нажимать ещё
             try:
-                await query.edit_message_reply_markup(reply_markup=None)
-            except TelegramError:
-                pass
-            try:
-                await query.answer("✅ Спасибо! Решение получило +1", show_alert=False)
+                await query.answer(f"✅ Рейтинг решения: {new_rating}", show_alert=False)
             except TelegramError:
                 pass
             logger.info("KB #%s rated +1 by user %s, new rating %s", kb_id, user_id, new_rating)
 
         elif action == "kb_nothelpful":
-            try:
-                repo_of(context).register_kb_vote(kb_id, user_id, -1)
-            except DatabaseError as exc:
-                logger.warning("register_kb_vote failed: %s", exc)
             new_rating = repo_of(context).rate_kb(kb_id, -1)
-            try:
-                await query.edit_message_reply_markup(reply_markup=None)
-            except TelegramError:
-                pass
+            # НЕ убираем клавиатуру — можно нажимать ещё
 
             if new_rating == -999:
                 try:
-                    await query.answer("🗑️ Спасибо! Решение удалено из базы.", show_alert=False)
+                    await query.edit_message_reply_markup(reply_markup=None)
+                except TelegramError:
+                    pass
+                try:
+                    await query.answer("🗑️ Решение удалено из базы.", show_alert=True)
                 except TelegramError:
                     pass
                 logger.info("KB #%s deleted after too many dislikes", kb_id)
-            else:
-                try:
-                    await query.answer("🔄 Передаю ответственному...", show_alert=False)
-                except TelegramError:
-                    pass
-                logger.info("KB #%s rated -1 by user %s, new rating %s", kb_id, user_id, new_rating)
+                return
 
-            # Эскалация
+            try:
+                await query.answer(f"❌ Рейтинг решения: {new_rating}", show_alert=False)
+            except TelegramError:
+                pass
+            logger.info("KB #%s rated -1 by user %s, new rating %s", kb_id, user_id, new_rating)
+
+            # Эскалация ответственному
             user = query.from_user
             problem = str(context.user_data.get("last_problem_text", ""))
             if not problem:
