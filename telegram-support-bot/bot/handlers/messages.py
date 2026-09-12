@@ -49,6 +49,7 @@ async def _send_long(message, text: str) -> None:
 
 
 async def _try_learn_from_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Автообучение: если админ отвечает реплаем на сообщение бота — сохраняем решение."""
     message = update.message
     reply_to = message.reply_to_message
     if reply_to is None:
@@ -86,7 +87,11 @@ async def _try_learn_from_reply(update: Update, context: ContextTypes.DEFAULT_TY
 
     try:
         repo_of(context).add_solution(problem_text, solution_text)
-        await safe_reply(message, "🧠 Спасибо! Я запомнил это решение и буду выдавать его автоматически при похожих проблемах.")
+        await safe_reply(
+            message,
+            "🧠 Спасибо! Я запомнил это решение и буду выдавать его автоматически "
+            "при похожих проблемах.",
+        )
         logger.info("Auto-learned solution for: %s", problem_text[:60])
         if reply_to.message_id in pending:
             del pending[reply_to.message_id]
@@ -96,7 +101,7 @@ async def _try_learn_from_reply(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 def _extract_text(message) -> str:
-    """Извлекает текст из сообщения, включая пересланные."""
+    """Извлекает текст из сообщения, включая пересланные (caption)."""
     if message.text:
         return message.text
     if message.caption:
@@ -105,6 +110,7 @@ def _extract_text(message) -> str:
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Маршрутизация входящих текстовых сообщений."""
     message = update.message
     if message is None:
         return
@@ -116,8 +122,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user = message.from_user
     username = user.username if user else None
     lang = detect_language(text)
-    logger.info("Incoming text from %s (chat_id=%s, lang=%s): %s", username, message.chat_id, lang, text[:120])
+    logger.info(
+        "Incoming text from %s (chat_id=%s, lang=%s): %s",
+        username, message.chat_id, lang, text[:120],
+    )
 
+    # Бан-проверка
     try:
         if user and repo_of(context).is_banned(user.id):
             await safe_reply(message, t("banned", lang))
@@ -125,6 +135,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except DatabaseError:
         logger.error("Ban check failed; allowing message through")
 
+    # Автообучение из реплаев
     if message.reply_to_message:
         if await _try_learn_from_reply(update, context):
             return
@@ -167,11 +178,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await safe_reply(message, t("notify_failed", lang))
         return
 
-    # 4) Запрос на доработку
+    # 4) Запрос на доработку системы
     if matcher.is_feature_request(text) and len(text) > 80:
         logger.info("Feature request recognized")
         _remember_problem(context, message.chat_id, text)
-        await safe_reply(message, "📝 Принято! Это запрос на доработку системы. Передаю ответственным.")
+        await safe_reply(
+            message,
+            "📝 Принято! Это запрос на доработку системы. Передаю ответственным.",
+        )
         try:
             await notifications_of(context).escalate(
                 context.bot, username=username, body=text, kind="feature", context=context,
@@ -202,8 +216,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 answer = ai.answer_with_context(text, [sol for _, sol in solutions])
                 keyboard = InlineKeyboardMarkup(
                     [[
-                        InlineKeyboardButton(t("btn_kb_helpful", lang), callback_data=f"kb_helpful:{top_id}"),
-                        InlineKeyboardButton(t("btn_kb_nothelpful", lang), callback_data=f"kb_nothelpful:{top_id}"),
+                        InlineKeyboardButton(
+                            t("btn_kb_helpful", lang),
+                            callback_data=f"kb_helpful:{top_id}",
+                        ),
+                        InlineKeyboardButton(
+                            t("btn_kb_nothelpful", lang),
+                            callback_data=f"kb_nothelpful:{top_id}",
+                        ),
                     ]]
                 )
                 if len(answer) <= TG_MAX:
@@ -212,8 +232,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     parts = [answer[i:i + TG_MAX] for i in range(0, len(answer), TG_MAX)]
                     for i, part in enumerate(parts):
                         prefix = "✅ " if i == 0 else ""
-                        await message.reply_text(f"{prefix}{part}",
-                                                  reply_markup=keyboard if i == 0 else None)
+                        await message.reply_text(
+                            f"{prefix}{part}",
+                            reply_markup=keyboard if i == 0 else None,
+                        )
                 if user:
                     try:
                         repo_of(context).log_message(
@@ -226,6 +248,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             except ExternalAPIError:
                 logger.warning("RAG AI failed, falling back to advice")
 
+        # Fallback: случайный совет + кнопки
         advice = advice_of(context).random_advice()
         keyboard = InlineKeyboardMarkup(
             [[
@@ -250,12 +273,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             logger.exception("Failed to send advice reply")
         return
 
-    # 6) Просто вопрос / болтовня
-    # В группе — молчим (защита от шума). В личке — отвечаем.
+    # 6) Общий вопрос
     is_private = message.chat.type == ChatType.PRIVATE
     ai = ai_of(context)
 
-    if is_private and ai.enabled and len(text) > 2:
+    # В личке — отвечаем на всё.
+    # В группе — только на РАБОЧИЕ вопросы (медицина, система, документы).
+    should_answer = is_private or matcher.is_work_question(text)
+
+    if should_answer and ai.enabled and len(text) > 2:
         try:
             answer = ai.ask(text)
             if not answer:
@@ -267,6 +293,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except ExternalAPIError:
             logger.warning("AI ask failed")
     else:
-        logger.info("General question in group — ignored (use /ask)")
+        logger.info("Off-topic question in group — ignored")
 
     return
