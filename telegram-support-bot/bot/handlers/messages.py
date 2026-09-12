@@ -17,11 +17,12 @@ from bot.handlers.common import (
     advice_of, ai_of, matcher_of, notifications_of,
     repo_of, safe_reply, settings_of,
 )
+from bot.utils.telegram_format import markdown_to_telegram_html, split_html_message
 
 logger = logging.getLogger(__name__)
 
 _ESCALATION_RE = re.compile(r"Сообщение:\s*(.+)", re.DOTALL)
-TG_MAX = 4000  # Чуть меньше лимита Telegram (4096)
+TG_MAX = 4000
 
 
 def _remember_problem(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str) -> None:
@@ -34,22 +35,32 @@ def _get_last_problem(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> str |
     return context.bot_data.get("last_problem_by_chat", {}).get(chat_id)
 
 
-async def _send_long(message, text: str) -> None:
-    """Отправляет длинный ответ, разбивая на части по лимиту Telegram."""
-    if not text:
-        return
-    if len(text) <= TG_MAX:
-        await message.reply_text(text)
-        logger.info("AI answer sent (len=%s)", len(text))
-        return
-    parts = [text[i:i + TG_MAX] for i in range(0, len(text), TG_MAX)]
-    for part in parts:
-        await message.reply_text(part)
-    logger.info("AI answer sent in %s parts (total=%s)", len(parts), len(text))
+def _add_to_history(context: ContextTypes.DEFAULT_TYPE, role: str, content: str) -> None:
+    """Добавляет сообщение в историю диалога пользователя."""
+    history = context.user_data.setdefault("dialogue_history", [])
+    history.append({"role": role, "content": content[:2000]})
+    # Оставляем последние 10
+    if len(history) > 10:
+        del history[:-10]
+
+
+def _get_history(context: ContextTypes.DEFAULT_TYPE) -> list[dict]:
+    return context.user_data.get("dialogue_history", [])
+
+
+async def _send_html(message, markdown_text: str, reply_markup=None) -> None:
+    """Отправляет Markdown-текст как HTML в Telegram (с разбивкой)."""
+    html_text = markdown_to_telegram_html(markdown_text)
+    parts = split_html_message(html_text, max_len=TG_MAX)
+    for i, part in enumerate(parts):
+        await message.reply_text(
+            part,
+            parse_mode="HTML",
+            reply_markup=reply_markup if i == 0 else None,
+        )
 
 
 async def _try_learn_from_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Автообучение: если админ отвечает реплаем на сообщение бота — сохраняем решение."""
     message = update.message
     reply_to = message.reply_to_message
     if reply_to is None:
@@ -101,7 +112,6 @@ async def _try_learn_from_reply(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 def _extract_text(message) -> str:
-    """Извлекает текст из сообщения, включая пересланные (caption)."""
     if message.text:
         return message.text
     if message.caption:
@@ -110,7 +120,6 @@ def _extract_text(message) -> str:
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Маршрутизация входящих текстовых сообщений."""
     message = update.message
     if message is None:
         return
@@ -127,7 +136,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         username, message.chat_id, lang, text[:120],
     )
 
-    # Бан-проверка
     try:
         if user and repo_of(context).is_banned(user.id):
             await safe_reply(message, t("banned", lang))
@@ -135,7 +143,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except DatabaseError:
         logger.error("Ban check failed; allowing message through")
 
-    # Автообучение из реплаев
     if message.reply_to_message:
         if await _try_learn_from_reply(update, context):
             return
@@ -147,17 +154,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     settings = settings_of(context)
     matcher = matcher_of(context)
 
-    # 1) Вопросы о боте
     if matcher.mentions_bot(text, settings.bot_username) or matcher.is_about_bot(text):
         await safe_reply(message, BOT_INFO_TEXT)
         return
 
-    # 2) Технические работы
     if matcher.is_technical_works(text):
         await safe_reply(message, t("tech_works", lang))
         return
 
-    # 3) Явный запрос помощи
     if matcher.is_help_request(text):
         logger.info("Help request recognized")
         _remember_problem(context, message.chat_id, text)
@@ -178,7 +182,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await safe_reply(message, t("notify_failed", lang))
         return
 
-    # 4) Запрос на доработку системы
     if matcher.is_feature_request(text) and len(text) > 80:
         logger.info("Feature request recognized")
         _remember_problem(context, message.chat_id, text)
@@ -194,7 +197,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             logger.error("Feature escalation failed")
         return
 
-    # 5) Проблема поддержки → RAG
     is_problem = matcher.is_support_problem(text)
     has_keyword = matcher.matches_keyword(text)
 
@@ -203,8 +205,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         _remember_problem(context, message.chat_id, text)
         context.user_data["last_problem_text"] = text
 
+        # 🎯 Берём 5 записей вместо 3 — лучшее объединение
         try:
-            solutions = repo_of(context).search_solutions(text, min_matches=1, limit=3)
+            solutions = repo_of(context).search_solutions(text, min_matches=1, limit=5)
         except DatabaseError:
             solutions = []
 
@@ -213,29 +216,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             logger.info("RAG: found %s solutions", len(solutions))
             try:
                 top_id, _ = solutions[0]
-                answer = ai.answer_with_context(text, [sol for _, sol in solutions])
+                # Сохраняем вопрос в историю
+                _add_to_history(context, "user", text)
+
+                answer = ai.answer_with_context(
+                    text,
+                    [sol for _, sol in solutions],
+                    style="default",
+                    dialogue_history=_get_history(context),
+                )
+
+                # Сохраняем ответ в историю
+                _add_to_history(context, "assistant", answer)
+
                 keyboard = InlineKeyboardMarkup(
                     [[
-                        InlineKeyboardButton(
-                            t("btn_kb_helpful", lang),
-                            callback_data=f"kb_helpful:{top_id}",
-                        ),
-                        InlineKeyboardButton(
-                            t("btn_kb_nothelpful", lang),
-                            callback_data=f"kb_nothelpful:{top_id}",
-                        ),
+                        InlineKeyboardButton(t("btn_kb_helpful", lang), callback_data=f"kb_helpful:{top_id}"),
+                        InlineKeyboardButton(t("btn_kb_nothelpful", lang), callback_data=f"kb_nothelpful:{top_id}"),
                     ]]
                 )
-                if len(answer) <= TG_MAX:
-                    await message.reply_text(f"✅ {answer}", reply_markup=keyboard)
-                else:
-                    parts = [answer[i:i + TG_MAX] for i in range(0, len(answer), TG_MAX)]
-                    for i, part in enumerate(parts):
-                        prefix = "✅ " if i == 0 else ""
-                        await message.reply_text(
-                            f"{prefix}{part}",
-                            reply_markup=keyboard if i == 0 else None,
-                        )
+                await _send_html(message, answer, reply_markup=keyboard)
+
                 if user:
                     try:
                         repo_of(context).log_message(
@@ -248,7 +249,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             except ExternalAPIError:
                 logger.warning("RAG AI failed, falling back to advice")
 
-        # Fallback: случайный совет + кнопки
+        # Fallback
         advice = advice_of(context).random_advice()
         keyboard = InlineKeyboardMarkup(
             [[
@@ -273,20 +274,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             logger.exception("Failed to send advice reply")
         return
 
-    # 6) Общий вопрос
+    # Общий вопрос
     is_private = message.chat.type == ChatType.PRIVATE
     ai = ai_of(context)
 
-    # В личке — отвечаем на всё.
-    # В группе — только на РАБОЧИЕ вопросы (медицина, система, документы).
     should_answer = is_private or matcher.is_work_question(text)
 
     if should_answer and ai.enabled and len(text) > 2:
         try:
+            _add_to_history(context, "user", text)
             answer = ai.ask(text)
             if not answer:
                 return
-            await _send_long(message, answer)
+            _add_to_history(context, "assistant", answer)
+            await _send_html(message, answer)
             return
         except TelegramError as exc:
             logger.error("Telegram error while sending AI answer: %s", exc)
