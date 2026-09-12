@@ -91,6 +91,7 @@ def _signature(text: str) -> str:
 
 
 class SupportRepository:
+    """CRUD helpers for keywords, responsible users, bans, and knowledge base."""
 
     # ---------- Keywords ----------
     def list_keywords(self) -> list[str]:
@@ -322,21 +323,28 @@ class SupportRepository:
 
     # ---------- KbVote (защита от повторного голоса) ----------
     def has_voted_kb(self, kb_id: int, user_id: int) -> bool:
+        """Проверяет, голосовал ли уже этот пользователь за эту запись."""
         try:
             with session_scope() as session:
                 existing = session.scalar(
-                    select(KbVote).where(KbVote.kb_id == kb_id, KbVote.user_id == user_id)
+                    select(KbVote).where(
+                        KbVote.kb_id == kb_id,
+                        KbVote.user_id == user_id,
+                    )
                 )
                 return existing is not None
         except SQLAlchemyError:
+            logger.exception("Failed to check vote")
             return False
 
     def register_kb_vote(self, kb_id: int, user_id: int, vote: int) -> None:
+        """Регистрирует голос пользователя (защита от накрутки)."""
         try:
             with session_scope() as session:
                 session.add(KbVote(kb_id=kb_id, user_id=user_id, vote=vote))
-        except SQLAlchemyError as exc:
-            raise DatabaseError("Could not register vote") from exc
+        except SQLAlchemyError:
+            logger.exception("Failed to register vote")
+            raise DatabaseError("Could not register vote")
 
     # ---------- Логирование сообщений ----------
     def log_message(
@@ -438,7 +446,10 @@ class SupportRepository:
             with session_scope() as session:
                 if session.scalar(select(Keyword.id).limit(1)) is None:
                     session.add_all([Keyword(word=w.lower()) for w in keywords])
+                    logger.info("Seeded %s default keywords", len(keywords))
                 if session.scalar(select(ResponsibleUser.id).limit(1)) is None:
                     session.add_all([ResponsibleUser(username=n) for n in responsible])
+                    logger.info("Seeded %s default responsible users", len(responsible))
         except SQLAlchemyError as exc:
+            logger.exception("Failed to seed database")
             raise DatabaseError("Could not seed database") from exc
