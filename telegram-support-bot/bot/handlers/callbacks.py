@@ -22,22 +22,38 @@ async def advice_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     logger.info("advice_callback: data=%s user=%s", query.data, query.from_user.id if query.from_user else None)
 
-    try:
-        await query.answer()
-    except TelegramError:
-        logger.exception("Failed to answer callback query")
-
     data = query.data or ""
     try:
         if data == "advice_helped":
-            await query.edit_message_reply_markup(reply_markup=None)
-            await query.answer("✅ Отлично! Рады, что помогли.", show_alert=False)
+            # Кнопки исчезают, окно "Спасибо"
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except TelegramError:
+                pass
+            try:
+                await query.answer("✅ Отлично! Рады, что помогли.", show_alert=True)
+            except TelegramError:
+                pass
             return
+
         if data == "advice_not_helped":
-            await query.edit_message_reply_markup(reply_markup=None)
-            await query.answer("🔄 Передаю ответственному...", show_alert=False)
+            # Кнопки исчезают, эскалация
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except TelegramError:
+                pass
+            try:
+                await query.answer("🔄 Передаю ответственному...", show_alert=True)
+            except TelegramError:
+                pass
             user = query.from_user
             problem = str(context.user_data.get("last_problem_text", ""))
+            if not problem:
+                problem = context.bot_data.get("last_problem_by_chat", {}).get(
+                    query.message.chat_id, ""
+                )
+            if not problem:
+                problem = "(текст проблемы не сохранён)"
             try:
                 await notifications_of(context).escalate(
                     context.bot,
@@ -54,7 +70,11 @@ async def advice_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def kb_rating_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Оценка RAG-ответа. Защита от дублирования убрана — каждый клик меняет рейтинг."""
+    """Оценка RAG-ответа.
+
+    👍 Помогло    → +1 к рейтингу, кнопки исчезают, окно «Спасибо».
+    👎 Не помогло → -1 к рейтингу, кнопки исчезают, ЭСКАЛАЦИЯ ответственному.
+    """
     query = update.callback_query
     if query is None:
         logger.warning("kb_rating_callback: query is None")
@@ -66,58 +86,76 @@ async def kb_rating_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         query.from_user.id if query.from_user else None,
     )
 
-    # Сразу отвечаем Telegram (убираем "часики")
-    try:
-        await query.answer()
-    except TelegramError as exc:
-        logger.warning("Failed to answer callback query: %s", exc)
-
     data = query.data or ""
     try:
         action, _, kb_id_str = data.partition(":")
         kb_id = int(kb_id_str)
     except (ValueError, AttributeError) as exc:
         logger.error("Failed to parse callback data '%s': %s", data, exc)
+        try:
+            await query.answer("Ошибка обработки кнопки", show_alert=True)
+        except TelegramError:
+            pass
         return
 
     user_id = query.from_user.id if query.from_user else 0
     if user_id == 0:
-        logger.warning("user_id is 0 in kb_rating_callback")
         return
 
     try:
         if action == "kb_helpful":
+            # 👍 Помогло
             new_rating = repo_of(context).rate_kb(kb_id, +1)
-            # НЕ убираем клавиатуру — можно нажимать ещё
+
+            # 1. Убираем клавиатуру (кнопки исчезают)
             try:
-                await query.answer(f"✅ Рейтинг решения: {new_rating}", show_alert=False)
+                await query.edit_message_reply_markup(reply_markup=None)
+            except TelegramError as exc:
+                logger.warning("Failed to remove keyboard: %s", exc)
+
+            # 2. Всплывающее окно
+            try:
+                await query.answer(
+                    f"✅ Спасибо! Текущий рейтинг решения: {new_rating}",
+                    show_alert=True,
+                )
             except TelegramError:
                 pass
+
             logger.info("KB #%s rated +1 by user %s, new rating %s", kb_id, user_id, new_rating)
 
         elif action == "kb_nothelpful":
+            # 👎 Не помогло
             new_rating = repo_of(context).rate_kb(kb_id, -1)
-            # НЕ убираем клавиатуру — можно нажимать ещё
 
+            # 1. Убираем клавиатуру (кнопки исчезают)
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except TelegramError as exc:
+                logger.warning("Failed to remove keyboard: %s", exc)
+
+            # 2. Окно
             if new_rating == -999:
                 try:
-                    await query.edit_message_reply_markup(reply_markup=None)
-                except TelegramError:
-                    pass
-                try:
-                    await query.answer("🗑️ Решение удалено из базы.", show_alert=True)
+                    await query.answer(
+                        "🗑️ Решение удалено из базы как нерабочее.",
+                        show_alert=True,
+                    )
                 except TelegramError:
                     pass
                 logger.info("KB #%s deleted after too many dislikes", kb_id)
                 return
 
             try:
-                await query.answer(f"❌ Рейтинг решения: {new_rating}", show_alert=False)
+                await query.answer(
+                    "🔄 Спасибо! Передаю ответственному...",
+                    show_alert=True,
+                )
             except TelegramError:
                 pass
             logger.info("KB #%s rated -1 by user %s, new rating %s", kb_id, user_id, new_rating)
 
-            # Эскалация ответственному
+            # 3. Эскалация ответственному
             user = query.from_user
             problem = str(context.user_data.get("last_problem_text", ""))
             if not problem:
