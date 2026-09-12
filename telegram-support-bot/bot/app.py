@@ -32,14 +32,17 @@ async def _post_init(application: Application) -> None:
 
 def build_application(settings: Settings) -> Application:
     """Wire handlers, services, and the Telegram Application."""
+    # 1. Создаём engine
     init_engine(settings)
+    # 2. Создаём таблицы и колонки
     try:
         create_all_tables()
-        ensure_columns()  # аккуратно добавляем новые колонки (rating) в существующие таблицы
+        ensure_columns()
         logger.info("Database tables ensured via SQLAlchemy metadata")
     except Exception as exc:
         logger.exception("Failed to create tables: %s", exc)
 
+    # 3. Сервисы
     repository = SupportRepository()
     repository.seed_if_empty(INITIAL_KEYWORDS, DEFAULT_RESPONSIBLE)
     keywords = repository.list_keywords()
@@ -60,9 +63,12 @@ def build_application(settings: Settings) -> Application:
     application.bot_data["notifications"] = NotificationService(settings, repository)
     application.bot_data["ai"] = AiService(settings)
 
+    # 4. Обработчики
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message), group=0
     )
+
+    # 5. Callback'и кнопок
     application.add_handler(
         CallbackQueryHandler(
             advice_callback, pattern=r"^(advice_helped|advice_not_helped)$"
@@ -76,6 +82,7 @@ def build_application(settings: Settings) -> Application:
         group=2,
     )
 
+    # 6. Команды из commands.yaml
     registry = CommandRegistry(settings)
     registry.register(application)
     application.bot_data["command_registry"] = registry
@@ -92,4 +99,5 @@ def run() -> None:
     logger.info("Starting support bot")
     start_health_server()
     application = build_application(settings)
+    # drop_pending_updates=False — не теряем сообщения при перезапуске
     application.run_polling(drop_pending_updates=False)
