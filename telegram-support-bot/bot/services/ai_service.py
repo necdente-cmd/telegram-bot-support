@@ -28,20 +28,18 @@ _LANGUAGE_INSTRUCTION = (
     "НИКОГДА не смешивай языки в одном ответе."
 )
 
-# 🎯 Контекст системы, в которой работают сотрудники
 _SYSTEM_CONTEXT = (
-    "КОНТЕКСТ СИСТЕМЫ:\n"
-    "Все сотрудники работают в медицинской информационной системе «Sanarip Clinic» "
-    "(также известна как МИС, Санарип, Санприп, Sanarip, түндүк, Түндүк).\n"
-    "Когда сотрудник говорит «база», «база данных», «система», «программа», «сайт», «МИС» — "
-    "он ВСЕГДА имеет в виду Sanarip Clinic, а не какую-то другую базу данных.\n"
-    "Sanarip Clinic включает модули: амбулаторная карта, стационарная карта, "
-    "лабораторная система iLAB, электронный больничный (ЛВН), онлайн-запись, "
-    "дашборды, отчёты, интеграции с ЦСМ и ГСВ.\n"
+    "Ты — технический эксперт поддержки медицинской информационной системы "
+    "«Sanarip Clinic» (Кыргызская Республика).\n\n"
+    "СИСТЕМА включает модули: Амбулаторная карта, Стационарная карта, Справки "
+    "(083/у, 086/у, 095/у, 026/у), ЛВН, Регистры (СД, ГВГ, ЖРВ), МСЭК/РВКК/ВКК, "
+    "Партограмма, еСОМу, КСФ, ЭМК, Аудит МКАБ, ЕСИ/ОЭП.\n\n"
+    "КОНТЕКСТ: «база», «система», «программа», «сайт», «МИС» = Sanarip Clinic.\n"
 )
 
 
 def strip_markdown(text: str) -> str:
+    """Убирает Markdown-разметку (для не-HTML отправки)."""
     cleaned = text
     for pattern, replacement in _MARKDOWN_PATTERNS:
         cleaned = pattern.sub(replacement, cleaned)
@@ -71,7 +69,7 @@ class AiService:
         return self._client is not None
 
     def ask(self, question: str) -> str:
-        """Общий вопрос — отвечаем с учётом контекста Sanarip Clinic."""
+        """Общий вопрос — Markdown-ответ."""
         if self._client is None:
             raise ExternalAPIError("AI is not configured")
         try:
@@ -82,9 +80,10 @@ class AiService:
                         "role": "system",
                         "content": (
                             "Ты — технический ассистент поддержки сотрудников "
-                            "медицинских организаций Кыргызстана.\n"
-                            f"{_SYSTEM_CONTEXT}\n"
-                            f"{_LANGUAGE_INSTRUCTION}"
+                            "медицинских организаций Кыргызстана. "
+                            "Отвечай дружелюбно, но по делу. "
+                            "Используй **жирный** для важного и `код` для полей. "
+                            f"{_SYSTEM_CONTEXT}\n{_LANGUAGE_INSTRUCTION}"
                         ),
                     },
                     {"role": "user", "content": question},
@@ -102,42 +101,97 @@ class AiService:
         choice = response.choices[0].message.content if response.choices else None
         if not choice:
             raise ExternalAPIError("AI returned an empty response")
-        return strip_markdown(choice)
+        return choice.strip()
 
-    def answer_with_context(self, question: str, context_solutions: list[str]) -> str:
-        """RAG-ответ на основе базы знаний."""
+    def answer_with_context(
+        self,
+        question: str,
+        context_solutions: list[str],
+        style: str = "default",
+        dialogue_history: list[dict] | None = None,
+    ) -> str:
+        """RAG-ответ с объединением записей, контекстом диалога и стилем.
+
+        Args:
+            question: вопрос пользователя
+            context_solutions: список найденных решений (из базы знаний)
+            style: "default" | "newbie" | "expert" | "manager"
+            dialogue_history: список последних сообщений [{"role": ..., "content": ...}]
+        """
         if self._client is None:
             raise ExternalAPIError("AI is not configured")
 
-        context = "\n\n".join(f"• {sol}" for sol in context_solutions)
+        # Объединяем найденные записи в блок контекста
+        context = "\n\n".join(
+            f"Запись {i}:\n{sol}" for i, sol in enumerate(context_solutions, 1)
+        )
+
+        # Стиль ответа
+        style_rules = {
+            "newbie": (
+                "СТИЛЬ: подробно, дружелюбно, с путями в меню. "
+                "Пользователь — новичок, объясняй по шагам."
+            ),
+            "expert": (
+                "СТИЛЬ: кратко, без пояснений базовых вещей. "
+                "Пользователь — опытный, давай только суть."
+            ),
+            "manager": (
+                "СТИЛЬ: с ссылками на нормативные документы и приказы МЗ КР."
+            ),
+            "default": (
+                "СТИЛЬ: дружелюбно, живо, но по делу. "
+                "Создавай ощущение диалога с опытным коллегой."
+            ),
+        }.get(style, "")
+
+        system_prompt = (
+            f"{_SYSTEM_CONTEXT}\n"
+            f"{style_rules}\n\n"
+            "ЗАДАЧА:\n"
+            "У тебя есть вопрос пользователя и несколько ВЫДЕРЖЕК из базы знаний.\n\n"
+            "ПРАВИЛА:\n"
+            "1. Сформулируй ЦЕЛЬНЫЙ ответ, объединив ВСЕ подходящие выдержки "
+            "в один связный текст. Не перечисляй их по отдельности.\n"
+            "2. Если в выдержках есть пошаговая инструкция — оформи её "
+            "нумерованным списком (1. 2. 3.).\n"
+            "3. Используй **жирный** для важных слов и `код` для названий "
+            "полей и кнопок.\n"
+            "4. Указывай точные пути: **Приём → Регистрация → Поиск**.\n"
+            "5. Сохраняй ЖИВОЙ, дружелюбный стиль. Начинай с краткого "
+            "введения (1 предложение), потом детали.\n"
+            "6. Если информации в выдержках НЕ хватает — задай 1 уточняющий "
+            "вопрос в конце. Но не выдумывай.\n"
+            "7. Максимум 7 предложений / пунктов.\n\n"
+            f"{_LANGUAGE_INSTRUCTION}"
+        )
+
+        # Собираем сообщения: system + история + user
+        messages = [{"role": "system", "content": system_prompt}]
+
+        # Добавляем историю диалога (если есть)
+        if dialogue_history:
+            messages.extend(dialogue_history[-5:])  # последние 5
+
+        messages.append({
+            "role": "user",
+            "content": (
+                f"Вопрос пользователя: {question}\n\n"
+                f"Найденные выдержки из базы знаний:\n{context}"
+            ),
+        })
 
         try:
             response = self._client.chat.completions.create(
                 model=self._settings.ai_model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "Ты — технический эксперт поддержки системы «Sanarip Clinic».\n"
-                            f"{_SYSTEM_CONTEXT}\n"
-                            "Тебе дают вопрос пользователя и выдержки из базы знаний "
-                            "(ранее решённые похожие проблемы).\n"
-                            "Сформулируй КРАТКИЙ, точный и вежливый ответ на основе этих выдержек.\n"
-                            "Если выдержки не помогают — честно скажи, что не знаешь решения.\n"
-                            f"{_LANGUAGE_INSTRUCTION}"
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": f"Вопрос: {question}\n\nИзвестные решения:\n{context}",
-                    },
-                ],
+                messages=messages,
             )
             choice = response.choices[0].message.content if response.choices else None
             if not choice:
                 raise ExternalAPIError("AI returned an empty response")
-            return strip_markdown(choice)
+            return choice.strip()
         except ExternalAPIError:
             raise
         except Exception as exc:
+            logger.exception("RAG AI request failed")
             raise ExternalAPIError("AI request failed") from exc
