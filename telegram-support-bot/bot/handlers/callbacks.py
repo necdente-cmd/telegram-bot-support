@@ -20,6 +20,8 @@ async def advice_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if query is None:
         return
 
+    logger.info("advice_callback: data=%s user=%s", query.data, query.from_user.id if query.from_user else None)
+
     try:
         await query.answer()
     except TelegramError:
@@ -55,57 +57,88 @@ async def kb_rating_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     """Оценка RAG-ответа с защитой от повторного голосования."""
     query = update.callback_query
     if query is None:
+        logger.warning("kb_rating_callback: query is None")
         return
 
+    # ВАЖНО: логируем СРАЗУ, до всего остального
+    logger.info(
+        "kb_rating_callback: data=%s user_id=%s",
+        query.data,
+        query.from_user.id if query.from_user else None,
+    )
+
+    # Сразу отвечаем Telegram (убираем "часики")
     try:
         await query.answer()
-    except TelegramError:
-        logger.exception("Failed to answer callback query")
+    except TelegramError as exc:
+        logger.warning("Failed to answer callback query: %s", exc)
 
     data = query.data or ""
     try:
         action, _, kb_id_str = data.partition(":")
         kb_id = int(kb_id_str)
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError) as exc:
+        logger.error("Failed to parse callback data '%s': %s", data, exc)
         return
 
     user_id = query.from_user.id if query.from_user else 0
     if user_id == 0:
+        logger.warning("user_id is 0 in kb_rating_callback")
         return
 
     # 🔒 Защита: один голос на пользователя на запись
     try:
-        if repo_of(context).has_voted_kb(kb_id, user_id):
-            await query.answer(
-                "⚠️ Вы уже голосовали за это решение.",
-                show_alert=True,
-            )
-            return
-    except DatabaseError:
-        logger.exception("Failed to check vote")
+        already_voted = repo_of(context).has_voted_kb(kb_id, user_id)
+    except Exception as exc:
+        logger.exception("has_voted_kb failed: %s", exc)
+        already_voted = False  # при ошибке — разрешаем голосовать
+
+    if already_voted:
+        try:
+            await query.answer("⚠️ Вы уже голосовали за это решение.", show_alert=True)
+        except TelegramError:
+            pass
         return
 
     try:
         if action == "kb_helpful":
-            repo_of(context).register_kb_vote(kb_id, user_id, +1)
+            try:
+                repo_of(context).register_kb_vote(kb_id, user_id, +1)
+            except DatabaseError as exc:
+                logger.warning("register_kb_vote failed: %s", exc)
             new_rating = repo_of(context).rate_kb(kb_id, +1)
-            await query.edit_message_reply_markup(reply_markup=None)
-            await query.answer("✅ Спасибо! Решение получило +1", show_alert=False)
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except TelegramError:
+                pass
+            try:
+                await query.answer("✅ Спасибо! Решение получило +1", show_alert=False)
+            except TelegramError:
+                pass
             logger.info("KB #%s rated +1 by user %s, new rating %s", kb_id, user_id, new_rating)
 
         elif action == "kb_nothelpful":
-            repo_of(context).register_kb_vote(kb_id, user_id, -1)
+            try:
+                repo_of(context).register_kb_vote(kb_id, user_id, -1)
+            except DatabaseError as exc:
+                logger.warning("register_kb_vote failed: %s", exc)
             new_rating = repo_of(context).rate_kb(kb_id, -1)
-            await query.edit_message_reply_markup(reply_markup=None)
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except TelegramError:
+                pass
 
             if new_rating == -999:
-                await query.answer(
-                    "🗑️ Спасибо! Решение удалено из базы как нерабочее.",
-                    show_alert=False,
-                )
+                try:
+                    await query.answer("🗑️ Спасибо! Решение удалено из базы.", show_alert=False)
+                except TelegramError:
+                    pass
                 logger.info("KB #%s deleted after too many dislikes", kb_id)
             else:
-                await query.answer("🔄 Передаю ответственному...", show_alert=False)
+                try:
+                    await query.answer("🔄 Передаю ответственному...", show_alert=False)
+                except TelegramError:
+                    pass
                 logger.info("KB #%s rated -1 by user %s, new rating %s", kb_id, user_id, new_rating)
 
             # Эскалация
@@ -129,6 +162,10 @@ async def kb_rating_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             except ExternalAPIError:
                 logger.error("Escalation after 'not helpful' failed")
 
-    except DatabaseError:
-        await query.answer("⚠️ Ошибка при сохранении оценки", show_alert=True)
+    except DatabaseError as exc:
+        logger.exception("DB error in kb_rating_callback: %s", exc)
+        try:
+            await query.answer("⚠️ Ошибка при сохранении оценки", show_alert=True)
+        except TelegramError:
+            pass
         return
