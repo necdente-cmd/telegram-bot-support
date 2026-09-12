@@ -28,6 +28,18 @@ _LANGUAGE_INSTRUCTION = (
     "НИКОГДА не смешивай языки в одном ответе."
 )
 
+# 🎯 Контекст системы, в которой работают сотрудники
+_SYSTEM_CONTEXT = (
+    "КОНТЕКСТ СИСТЕМЫ:\n"
+    "Все сотрудники работают в медицинской информационной системе «Sanarip Clinic» "
+    "(также известна как МИС, Санарип, Санприп, Sanarip, түндүк, Түндүк).\n"
+    "Когда сотрудник говорит «база», «база данных», «система», «программа», «сайт», «МИС» — "
+    "он ВСЕГДА имеет в виду Sanarip Clinic, а не какую-то другую базу данных.\n"
+    "Sanarip Clinic включает модули: амбулаторная карта, стационарная карта, "
+    "лабораторная система iLAB, электронный больничный (ЛВН), онлайн-запись, "
+    "дашборды, отчёты, интеграции с ЦСМ и ГСВ.\n"
+)
+
 
 def strip_markdown(text: str) -> str:
     cleaned = text
@@ -59,13 +71,22 @@ class AiService:
         return self._client is not None
 
     def ask(self, question: str) -> str:
+        """Общий вопрос — отвечаем с учётом контекста Sanarip Clinic."""
         if self._client is None:
             raise ExternalAPIError("AI is not configured")
         try:
             response = self._client.chat.completions.create(
                 model=self._settings.ai_model,
                 messages=[
-                    {"role": "system", "content": f"Ты — полезный и информативный ассистент. {_LANGUAGE_INSTRUCTION}"},
+                    {
+                        "role": "system",
+                        "content": (
+                            "Ты — технический ассистент поддержки сотрудников "
+                            "медицинских организаций Кыргызстана.\n"
+                            f"{_SYSTEM_CONTEXT}\n"
+                            f"{_LANGUAGE_INSTRUCTION}"
+                        ),
+                    },
                     {"role": "user", "content": question},
                 ],
             )
@@ -84,6 +105,7 @@ class AiService:
         return strip_markdown(choice)
 
     def answer_with_context(self, question: str, context_solutions: list[str]) -> str:
+        """RAG-ответ на основе базы знаний."""
         if self._client is None:
             raise ExternalAPIError("AI is not configured")
 
@@ -96,7 +118,8 @@ class AiService:
                     {
                         "role": "system",
                         "content": (
-                            "Ты — технический эксперт поддержки IT-системы Sanarip Clinic.\n"
+                            "Ты — технический эксперт поддержки системы «Sanarip Clinic».\n"
+                            f"{_SYSTEM_CONTEXT}\n"
                             "Тебе дают вопрос пользователя и выдержки из базы знаний "
                             "(ранее решённые похожие проблемы).\n"
                             "Сформулируй КРАТКИЙ, точный и вежливый ответ на основе этих выдержек.\n"
