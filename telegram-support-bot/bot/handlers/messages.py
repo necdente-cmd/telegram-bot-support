@@ -5,7 +5,8 @@ from __future__ import annotations
 import logging
 import re
 
-from telegram import ChatType, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ChatType
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
