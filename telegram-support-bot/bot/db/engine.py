@@ -76,7 +76,7 @@ def session_scope() -> Iterator[Session]:
 
 
 def create_all_tables() -> None:
-    """Fallback schema create used only if Alembic is unavailable."""
+    """Создаёт все таблицы из SQLAlchemy metadata (IF NOT EXISTS)."""
     Base.metadata.create_all(bind=get_engine())
 
 
@@ -98,7 +98,7 @@ def ensure_columns() -> None:
                 )
                 logger.info("Добавлена колонка 'rating' в knowledge_base")
 
-            # kb_votes — на всякий случай (если create_all пропустит)
+            # kb_votes — таблица для защиты от повторного голосования
             conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS kb_votes (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,5 +110,6 @@ def ensure_columns() -> None:
                 )
             """))
             conn.execute(text("CREATE INDEX IF NOT EXISTS idx_kb_votes_kb_id ON kb_votes(kb_id)"))
+            logger.info("Таблица kb_votes готова")
     except Exception as exc:
         logger.error("ensure_columns failed (continuing): %s", exc)
