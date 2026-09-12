@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import re
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import ChatType, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
@@ -20,6 +20,7 @@ from bot.handlers.common import (
 logger = logging.getLogger(__name__)
 
 _ESCALATION_RE = re.compile(r"Сообщение:\s*(.+)", re.DOTALL)
+TG_MAX = 4000  # Чуть меньше лимита Telegram (4096)
 
 
 def _remember_problem(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str) -> None:
@@ -32,8 +33,21 @@ def _get_last_problem(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> str |
     return context.bot_data.get("last_problem_by_chat", {}).get(chat_id)
 
 
+async def _send_long(message, text: str) -> None:
+    """Отправляет длинный ответ, разбивая на части по лимиту Telegram."""
+    if not text:
+        return
+    if len(text) <= TG_MAX:
+        await message.reply_text(text)
+        logger.info("AI answer sent (len=%s)", len(text))
+        return
+    parts = [text[i:i + TG_MAX] for i in range(0, len(text), TG_MAX)]
+    for part in parts:
+        await message.reply_text(part)
+    logger.info("AI answer sent in %s parts (total=%s)", len(parts), len(text))
+
+
 async def _try_learn_from_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Автообучение: если админ отвечает реплаем на сообщение бота — сохраняем решение."""
     message = update.message
     reply_to = message.reply_to_message
     if reply_to is None:
@@ -80,16 +94,28 @@ async def _try_learn_from_reply(update: Update, context: ContextTypes.DEFAULT_TY
     return True
 
 
+def _extract_text(message) -> str:
+    """Извлекает текст из сообщения, включая пересланные."""
+    if message.text:
+        return message.text
+    if message.caption:
+        return message.caption
+    return ""
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message
-    if message is None or not message.text:
+    if message is None:
         return
 
-    text = message.text
+    text = _extract_text(message)
+    if not text:
+        return
+
     user = message.from_user
     username = user.username if user else None
     lang = detect_language(text)
-    logger.info("Incoming text from %s (chat_id=%s, lang=%s): %s", username, message.chat_id, lang, text)
+    logger.info("Incoming text from %s (chat_id=%s, lang=%s): %s", username, message.chat_id, lang, text[:120])
 
     try:
         if user and repo_of(context).is_banned(user.id):
@@ -140,14 +166,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await safe_reply(message, t("notify_failed", lang))
         return
 
-    # 4) Запрос на доработку системы (длинный технический текст)
+    # 4) Запрос на доработку
     if matcher.is_feature_request(text) and len(text) > 80:
         logger.info("Feature request recognized")
         _remember_problem(context, message.chat_id, text)
-        await safe_reply(
-            message,
-            "📝 Принято! Это запрос на доработку системы. Передаю ответственным.",
-        )
+        await safe_reply(message, "📝 Принято! Это запрос на доработку системы. Передаю ответственным.")
         try:
             await notifications_of(context).escalate(
                 context.bot, username=username, body=text, kind="feature", context=context,
@@ -156,7 +179,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             logger.error("Feature escalation failed")
         return
 
-    # 5) Описание проблемы поддержки → RAG
+    # 5) Проблема поддержки → RAG
     is_problem = matcher.is_support_problem(text)
     has_keyword = matcher.matches_keyword(text)
 
@@ -182,7 +205,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         InlineKeyboardButton(t("btn_kb_nothelpful", lang), callback_data=f"kb_nothelpful:{top_id}"),
                     ]]
                 )
-                await message.reply_text(f"✅ {answer}", reply_markup=keyboard)
+                if len(answer) <= TG_MAX:
+                    await message.reply_text(f"✅ {answer}", reply_markup=keyboard)
+                else:
+                    parts = [answer[i:i + TG_MAX] for i in range(0, len(answer), TG_MAX)]
+                    for i, part in enumerate(parts):
+                        prefix = "✅ " if i == 0 else ""
+                        await message.reply_text(f"{prefix}{part}",
+                                                  reply_markup=keyboard if i == 0 else None)
                 if user:
                     try:
                         repo_of(context).log_message(
@@ -195,7 +225,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             except ExternalAPIError:
                 logger.warning("RAG AI failed, falling back to advice")
 
-        # Fallback: случайный совет
         advice = advice_of(context).random_advice()
         keyboard = InlineKeyboardMarkup(
             [[
@@ -220,18 +249,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             logger.exception("Failed to send advice reply")
         return
 
-    # 6) Просто вопрос / болтовня → ИИ отвечает, без RAG и эскалации
+    # 6) Просто вопрос / болтовня
+    # В группе — молчим (защита от шума). В личке — отвечаем.
+    is_private = message.chat.type == ChatType.PRIVATE
     ai = ai_of(context)
-    if ai.enabled and len(text) > 2:
+
+    if is_private and ai.enabled and len(text) > 2:
         try:
             answer = ai.ask(text)
-            # Отвечаем, но коротко
-            if answer and len(answer) < 1000:
-                await message.reply_text(answer)
-                logger.info("General AI answer sent")
+            if not answer:
                 return
+            await _send_long(message, answer)
+            return
+        except TelegramError as exc:
+            logger.error("Telegram error while sending AI answer: %s", exc)
         except ExternalAPIError:
-            logger.warning("General AI ask failed")
+            logger.warning("AI ask failed")
+    else:
+        logger.info("General question in group — ignored (use /ask)")
 
-    # Если ИИ не справился — молчим (не эскалируем болтовню)
     return
